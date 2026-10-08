@@ -26,6 +26,41 @@ Features: quick add (`Tmrw High New rule`), unfinished tasks move to the next da
 Import the repository in Vercel (Add New, Project). Vercel reads `vercel.json`, so no settings need changing.
 Every push to `main` redeploys automatically.
 
+## Signing key (required for Android builds)
+
+Release APKs are signed with one permanent key so updates install over the existing app.
+Add these repository secrets under Settings > Secrets and variables > Actions:
+
+| Secret | Value |
+|---|---|
+| `TUDO_KEYSTORE_BASE64` | The keystore file, base64-encoded |
+| `TUDO_KEYSTORE_PASSWORD` | Keystore password |
+| `TUDO_KEY_ALIAS` | `tudo` |
+| `TUDO_KEY_PASSWORD` | Key password (same as the keystore password) |
+
+Keep a copy of the keystore and passwords in a password manager. If the key is lost, the next APK
+cannot update the installed app.
+
+To create your own key instead (needs a JDK):
+
+```bash
+keytool -genkeypair -storetype PKCS12 -keystore tudo-release.jks -alias tudo -keyalg RSA -keysize 4096 -validity 10950
+base64 -w0 tudo-release.jks      # Windows PowerShell: [Convert]::ToBase64String([IO.File]::ReadAllBytes("tudo-release.jks"))
+```
+
+## Security
+
+- Data is encrypted at rest with AES-256-GCM once sign-in is set up. The data key is random and is stored only
+  wrapped with a key derived from the passphrase (PBKDF2-SHA256, 310,000 iterations) and with each recovery code.
+- The Android app is a signed, non-debuggable release build. Android backups and device-to-device transfer are off.
+- The Android bundle has a strict Content Security Policy and loads nothing from the network.
+- Failed sign-in attempts lock sign-in for 30 seconds, doubling up to an hour, and survive app restarts.
+- Every release lists the APK's SHA-256 checksum and the signing certificate fingerprint.
+
+Known limits: "Keep me signed in for 7 days" stores the unlock key on the device. The authenticator secret is
+stored unencrypted (it is useless without the passphrase). On claude.ai, Clipboard items are stored unencrypted
+so they can sync and be shared.
+
 ## Building the Android app locally
 
 Requirements: Node.js 22+, JDK 21, Android SDK 36.
@@ -33,8 +68,10 @@ Requirements: Node.js 22+, JDK 21, Android SDK 36.
 ```bash
 npm ci
 npm run android:init     # first time: generates android/
-npm run android:apk      # later builds
+npm run android:apk      # later builds (debug APK, for testing only)
 # APK: android/app/build/outputs/apk/debug/app-debug.apk
+# Signed release: set TUDO_KEYSTORE, TUDO_KEYSTORE_PASSWORD, TUDO_KEY_ALIAS, TUDO_KEY_PASSWORD, then
+# cd android && ./gradlew assembleRelease
 ```
 
 ## Notes

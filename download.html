@@ -60,12 +60,19 @@ a.link{color:var(--accent);font-weight:600}
       <li>Allow notifications when asked. On the Alarms tab, tap <b>Allow exact alarms</b> if it appears.</li>
       <li>On Samsung, Xiaomi, Oppo or Vivo phones, set Tudo's battery usage to <b>Unrestricted</b> (Settings, Apps, Tudo, Battery) so alarms are not delayed.</li>
     </ol>
-    <p class="note">Data in the Android app is stored only on that phone, separately from the web app. Android may warn that the app is from an unknown developer because it is not installed from Google Play.</p>
+    <p class="note">Data in the Android app is stored only on that phone, encrypted with your passphrase, and is excluded from Android backups. Android may warn that the app is from an unknown developer because it is not installed from Google Play.</p>
+  </div>
+
+  <div class="card">
+    <h2>Check the download (optional)</h2>
+    <p style="margin:0;color:var(--ink2)">Each release lists the APK's SHA-256 checksum. On Windows, run <code>certutil -hashfile Tudo.apk SHA256</code> and compare. Every Tudo release is signed with the same certificate:</p>
+    <p class="note" style="word-break:break-all;font-family:ui-monospace,Menlo,Consolas,monospace">AA:A0:3F:23:1F:DC:1C:C5:3D:FD:D4:7C:55:5A:84:2A:E0:FD:56:65:AF:FF:FA:4F:19:30:5B:52:00:F2:61:79</p>
+    <p class="note">If a release shows a different signing certificate, do not install it.</p>
   </div>
 
   <div class="card">
     <h2>Updating</h2>
-    <p style="margin:0;color:var(--ink2)">Download and install the latest APK over the existing app. Your tasks and alarms are kept.</p>
+    <p style="margin:0;color:var(--ink2)">Download and install the latest APK over the existing app. Your tasks and alarms are kept. If you installed a build from before October 8, 2026, uninstall it once first; earlier builds used a temporary signing key.</p>
     <p class="note">All builds: <a class="link" href="https://github.com/epbaskar26/Tudo/releases">github.com/epbaskar26/Tudo/releases</a></p>
   </div>
 </main>

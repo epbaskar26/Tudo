@@ -15,6 +15,8 @@ const swaps = [
   [/<link href="https:\/\/fonts\.googleapis\.com[^>]*>/, '<link href="fonts.css" rel="stylesheet">'],
   [/https:\/\/cdn\.jsdelivr\.net\/npm\/otpauth@[^"]+/, 'lib/otpauth.umd.min.js'],
   [/https:\/\/cdn\.jsdelivr\.net\/npm\/qrcode-generator@[^"]+/, 'lib/qrcode.js'],
+  // Only the app's own bundled files may load; nothing from the network.
+  [/<meta charset="utf-8">/, '<meta charset="utf-8">\n<meta http-equiv="Content-Security-Policy" content="default-src \'self\'; script-src \'self\' \'unsafe-inline\'; style-src \'self\' \'unsafe-inline\'; font-src \'self\'; img-src \'self\' data:; media-src \'self\' data:; connect-src \'self\'; object-src \'none\'; base-uri \'none\'; form-action \'none\'; frame-src \'none\'">'],
 ];
 for (const [re, rep] of swaps) { if (!re.test(html)) throw new Error('Pattern not found: ' + re); html = html.replace(re, rep); }
 writeFileSync('www/index.html', html);

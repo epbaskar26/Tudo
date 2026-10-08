@@ -593,8 +593,54 @@ function fresh() {
     settings: { pomo: 25, brk: 5, theme: 'auto' }
   };
 }
+/* ---------- encryption at rest ----------
+   Once sign-in is set up, everything except the sign-in record and a few display settings is stored
+   encrypted with AES-256-GCM. The data key is random; it is stored only wrapped (encrypted) with a key
+   derived from your passphrase (PBKDF2-SHA256) and, separately, with each recovery code. */
+const ENC = { raw: null, key: null, sealed: false };
+let ENV = null; // encrypted envelope waiting to be opened
+const PUB_SETTINGS = ['theme', 'accent', 'font', 'autoLock'];
+const rand32 = () => crypto.getRandomValues(new Uint8Array(32));
+async function setDEK(raw) { ENC.raw = raw; ENC.key = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']); }
+async function encStr(str, key = ENC.key) { const iv = crypto.getRandomValues(new Uint8Array(12)); const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(str))); return { iv: b64e(iv), ct: b64e(ct) }; }
+async function decStr(o, key = ENC.key) { const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(o.iv) }, key, b64d(o.ct)); return new TextDecoder().decode(pt); }
+async function kekFrom(secret, salt, iter) {
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt: b64d(salt), iterations: iter }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+async function wrapDEK(secret, iter = 310000) {
+  const salt = b64e(crypto.getRandomValues(new Uint8Array(16))), kek = await kekFrom(secret, salt, iter);
+  const iv = crypto.getRandomValues(new Uint8Array(12)), ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, kek, ENC.raw));
+  return { salt, iter, iv: b64e(iv), ct: b64e(ct) };
+}
+async function unwrapDEK(secret, w) {
+  try { const kek = await kekFrom(secret, w.salt, w.iter); return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(w.iv) }, kek, b64d(w.ct))); } catch (e) { return null; }
+}
+function emptyState(auth, pub) { return { v: 4, lists: [{ id: 'inbox', name: 'Inbox', color: '#13A8B1', sys: true }], tasks: [], habits: [], focus: [], alarms: [], settings: { pomo: 25, brk: 5, theme: 'auto', ...(pub || {}) }, auth }; }
+function adoptStored(str) {
+  const o = JSON.parse(str);
+  if (o && o.enc) { ENV = o; ENC.sealed = true; S = emptyState(o.auth, o.pub); }
+  else { ENV = null; ENC.sealed = false; S = o; }
+}
+async function serializeState() {
+  if (!S.auth || !ENC.key) return JSON.stringify(S);
+  const { auth, ...rest } = S, pub = {};
+  PUB_SETTINGS.forEach(k => { if (S.settings[k] !== undefined) pub[k] = S.settings[k]; });
+  const c = await encStr(JSON.stringify(rest));
+  return JSON.stringify({ enc: 1, auth, pub, iv: c.iv, ct: c.ct });
+}
+async function unseal() {
+  if (!ENC.sealed) return true;
+  if (!ENV || !ENC.key) return false;
+  try { const rest = JSON.parse(await decStr(ENV)); const auth = S.auth; S = rest; S.auth = auth; }
+  catch (e) { return false; }
+  ENV = null; ENC.sealed = false;
+  if (!CL.db) (S.clips || []).forEach(c => { CL.items[c.id] = { ...c, shared: false }; CL.base[c.id] = c.body; });
+  applyTheme();
+  return true;
+}
 let S;
-try { S = JSON.parse(localStorage.getItem('daybook:v1')) || fresh(); } catch (e) { S = fresh(); }
+try { const ls = localStorage.getItem('daybook:v1'); if (ls) adoptStored(ls); else S = fresh(); } catch (e) { S = fresh(); }
 const V = { calMode: 'week', view: 'tasks', f: { type: 'smart', id: 'today' }, sel: null, cal: today().slice(0, 7), calSel: today(), collapsed: { done: true }, sort: 'date' };
 let store = { kind: 'local' }, saveTimer = null, syncText = 'Saved on this device';
 
@@ -602,9 +648,12 @@ function save() {
   if (typeof nativeSchedule === 'function') nativeSchedule();
   clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
-    try { localStorage.setItem('daybook:v1', JSON.stringify(S)); } catch (e) {}
+    if (ENC.sealed) return;
+    let str; try { str = await serializeState(); } catch (e) { return; }
+    if (ENC.sealed) return;
+    try { localStorage.setItem('daybook:v1', str); } catch (e) {}
     if (store.kind === 'db') {
-      try { await store.ref.set({ s: JSON.stringify(S), at: Date.now() }); setSync('Synced to your account'); }
+      try { await store.ref.set({ s: str, at: Date.now() }); setSync('Synced to your account'); }
       catch (e) {
         if (e && e.code === 'unavailable') { setTimeout(save, 1500 + Math.random() * 1000); setSync('Retrying sync'); }
         else { store = { kind: 'local' }; setSync('Saved on this device'); }
@@ -624,8 +673,11 @@ async function initStore() {
     const ref = db.doc('data/users/' + id + '/state');
     const snap = await ref.get();
     if (snap.exists && snap.data().s) {
-      S = JSON.parse(snap.data().s);
+      const wasOpen = !ENC.sealed && AUTH.unlocked;
+      adoptStored(snap.data().s);
+      if (ENC.sealed && ENC.key && !(await unseal())) { ENC.raw = null; ENC.key = null; }
       try { localStorage.setItem('daybook:v1', snap.data().s); } catch (e) {}
+      if (wasOpen && ENC.sealed) { AUTH.unlocked = false; }
     }
     store = { kind: 'db', ref };
     if (authDecided && !AUTH.unlocked && S.auth && AUTH.step === 'setup') gate('signin');
@@ -769,7 +821,7 @@ function migrate() {
 }
 /* Unfinished tasks from earlier days move forward to today (setting: Tasks > Move unfinished tasks). */
 function rollover() {
-  if (!S || S.settings.rollover === false) return 0;
+  if (!S || ENC.sealed || S.settings.rollover === false) return 0;
   const t0 = today(); let n = 0;
   S.tasks.forEach(t => {
     if (t.done || t.deleted || !t.due || t.due >= t0) return;
@@ -1527,6 +1579,8 @@ async function clipAction(act, a) {
    Open-source pieces: otpauth (MIT) for TOTP codes, qrcode-generator (MIT) for the setup QR code.
    Passphrases are stored only as PBKDF2-SHA256 hashes (WebCrypto, 310,000 iterations, random salt). */
 const AUTH = { ready: false, unlocked: false, step: null, over: false, pending: null, fails: 0, lockUntil: 0, lastAct: Date.now() };
+try { const lo = JSON.parse(localStorage.getItem('daybook:lockout') || 'null'); if (lo) { AUTH.fails = lo.fails || 0; AUTH.lockUntil = lo.until || 0; } } catch (e) {}
+function saveLockout() { try { if (AUTH.fails || AUTH.lockUntil > Date.now()) localStorage.setItem('daybook:lockout', JSON.stringify({ fails: AUTH.fails, until: AUTH.lockUntil })); else localStorage.removeItem('daybook:lockout'); } catch (e) {} }
 const b64e = u => btoa(String.fromCharCode(...u));
 const b64d = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 async function pbkdf2(pass, salt, iter) {
@@ -1542,31 +1596,50 @@ function makeCodes() {
   const A = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
   return [...Array(8)].map(() => { const r = crypto.getRandomValues(new Uint8Array(8)); const s = [...r].map(x => A[x % A.length]).join(''); return s.slice(0, 4) + '-' + s.slice(4); });
 }
-async function hashCodes(codes) { const out = []; for (const c of codes) { const salt = newSalt(); out.push({ salt, hash: await pbkdf2(normCode(c), salt, 20000) }); } return out; }
+async function wrapCodes(codes) { const out = []; for (const c of codes) out.push(await wrapDEK(normCode(c), 100000)); return out; }
+// Sets a new passphrase: verifier hash plus the data key wrapped with it (creates the data key the first time).
+async function setPassphrase(pass) {
+  Object.assign(S.auth, await hashPass(pass));
+  if (!ENC.raw) await setDEK(rand32());
+  S.auth.wrap = await wrapDEK(pass);
+}
+// After the passphrase is verified: open the data key, or create it for data saved before encryption existed.
+async function openVault(pass) {
+  if (S.auth.wrap) {
+    const raw = await unwrapDEK(pass, S.auth.wrap); if (!raw) return false;
+    await setDEK(raw); return unseal();
+  }
+  await setDEK(rand32()); S.auth.wrap = await wrapDEK(pass); S.auth.rec = []; save(); return true;
+}
+const needsCodes = () => S.auth && !(S.auth.rec || []).some(r => r.ct);
 const libsOk = () => typeof OTPAuth !== 'undefined' && typeof qrcode !== 'undefined';
 function newTotpSecret() { return libsOk() ? new OTPAuth.Secret({ size: 20 }).base32 : null; }
 function totpFor(b32) { return new OTPAuth.TOTP({ issuer: 'Tudo', label: 'Tudo', algorithm: 'SHA1', digits: 6, period: 30, secret: OTPAuth.Secret.fromBase32(b32) }); }
 function totpOk(b32, token) { try { return totpFor(b32).validate({ token: String(token).replace(/\s/g, ''), window: 1 }) !== null; } catch (e) { return false; } }
 function qrSvg(b32) { const q = qrcode(0, 'M'); q.addData(totpFor(b32).toString()); q.make(); return q.createSvgTag({ cellSize: 4, margin: 0, scalable: true }); }
 const sessKey = () => S.auth ? S.auth.hash.slice(0, 16) : '';
-function sessionValid() {
+// Returns the stored data key if a remembered session is still valid, otherwise null.
+function sessionKey() {
+  if (!S.auth || !S.auth.wrap) return null;
   try {
     const t = JSON.parse(localStorage.getItem('daybook:trust') || 'null');
-    if (t && t.k === sessKey() && t.until > Date.now()) return true;
+    if (t && t.k === sessKey() && t.until > Date.now() && t.dk) return t.dk;
   } catch (e) {}
   try {
     const s = JSON.parse(sessionStorage.getItem('daybook:unlock') || 'null');
     const mins = S.settings.autoLock ?? 15;
-    if (s && s.k === sessKey() && (!mins || Date.now() - s.at < mins * 60000)) return true;
+    if (s && s.k === sessKey() && s.dk && (!mins || Date.now() - s.at < mins * 60000)) return s.dk;
   } catch (e) {}
-  return false;
+  return null;
 }
-function touchSession() { if (!AUTH.unlocked) return; try { sessionStorage.setItem('daybook:unlock', JSON.stringify({ k: sessKey(), at: Date.now() })); } catch (e) {} }
+function touchSession() { if (!AUTH.unlocked || !ENC.raw) return; try { sessionStorage.setItem('daybook:unlock', JSON.stringify({ k: sessKey(), at: Date.now(), dk: b64e(ENC.raw) })); } catch (e) {} }
 function unlock(keep) {
-  AUTH.unlocked = true; AUTH.fails = 0; AUTH.lastAct = Date.now(); AUTH.pending = null;
+  AUTH.unlocked = true; AUTH.fails = 0; AUTH.lockUntil = 0; saveLockout(); AUTH.lastAct = Date.now(); AUTH.pending = null;
   touchSession();
-  if (keep) { try { localStorage.setItem('daybook:trust', JSON.stringify({ k: sessKey(), until: Date.now() + 7 * 864e5 })); } catch (e) {} }
-  closeGate(); renderAll();
+  if (keep && ENC.raw) { try { localStorage.setItem('daybook:trust', JSON.stringify({ k: sessKey(), until: Date.now() + 7 * 864e5, dk: b64e(ENC.raw) })); } catch (e) {} }
+  closeGate(); renderAll(); save();
+  logMaintDone = ''; setTimeout(checkAlerts, 300); setTimeout(logMaintain, 800); if (typeof nativeSchedule === 'function') nativeSchedule();
+  if (needsCodes()) { AUTH.pending = { codes: makeCodes(), manage: true, forced: true }; gate('recovery', true); }
 }
 function lockApp() {
   AUTH.unlocked = false;
@@ -1575,11 +1648,12 @@ function lockApp() {
   gate('signin');
 }
 function closeGate() { const g = $('#gate'); g.hidden = true; g.innerHTML = ''; g.classList.remove('over'); document.body.classList.remove('gated'); AUTH.step = null; AUTH.over = false; }
-function authReady() {
+async function authReady() {
   AUTH.ready = true;
-  if (AUTH.unlocked && S.auth) return;
+  if (AUTH.unlocked && S.auth && !ENC.sealed) return;
   if (!S.auth) { AUTH.unlocked = false; return gate('setup'); }
-  if (sessionValid()) return unlock(false);
+  const dk = sessionKey();
+  if (dk) { try { await setDEK(b64d(dk)); if (await unseal()) return unlock(false); } catch (e) {} ENC.raw = null; ENC.key = null; }
   gate('signin');
 }
 document.addEventListener('pointerdown', () => { AUTH.lastAct = Date.now(); }, true);
@@ -1619,17 +1693,17 @@ function gate(step, over = false) {
   }
   if (step === 'recovery') {
     if (!P.codes) P.codes = makeCodes();
-    html = gCard('Save your recovery codes', 'If you forget your passphrase or lose your phone, each code lets you sign in once. Store them somewhere safe, like a password manager.',
+    html = gCard(P.forced ? 'Save your new recovery codes' : 'Save your recovery codes', (P.forced ? 'Your data is now encrypted. Older recovery codes cannot unlock it, so they have been replaced by the codes below. ' : '') + 'If you forget your passphrase or lose your phone, each code lets you sign in once. Store them somewhere safe, like a password manager.',
       `<div class="gcodes">${P.codes.map(c => `<span>${c}</span>`).join('')}</div>
        <button type="button" class="gbtn ghost" data-g="copycodes">Copy codes</button>
-       <form data-step="recovery"><label class="gcheck"><input type="checkbox" id="gsaved"> I saved these codes</label><button class="gbtn" id="gfinish" disabled>${P.manage ? 'Use these codes' : 'Finish setup'}</button></form>${P.manage ? cancelBtn() : ''}`);
+       <form data-step="recovery"><label class="gcheck"><input type="checkbox" id="gsaved"> I saved these codes</label><button class="gbtn" id="gfinish" disabled>${P.manage ? 'Use these codes' : 'Finish setup'}</button></form>${P.manage && !P.forced ? cancelBtn() : ''}`);
   }
   if (step === 'signin') {
     const locked = AUTH.lockUntil > Date.now();
     html = gCard('Sign in to Tudo', S.auth.totp ? 'Enter your passphrase and the code from your authenticator app.' : 'Enter your passphrase to continue.',
       `<form data-step="signin">${gField('gpass', 'Passphrase', 'password', 'autocomplete="current-password" required autofocus')}
        ${S.auth.totp ? gField('gcode', 'Authenticator code', 'text', 'inputmode="numeric" autocomplete="one-time-code" maxlength="7" class="code" required') : ''}
-       <label class="gcheck"><input type="checkbox" id="gkeep"> Keep me signed in on this device for 7 days</label>
+       <label class="gcheck"><input type="checkbox" id="gkeep"> Keep me signed in on this device for 7 days (stores the unlock key on this device)</label>
        <button class="gbtn" ${locked ? 'disabled' : ''}>Sign in</button></form>
        <button type="button" class="glink" data-g="to-recover">Forgot passphrase or lost your phone?</button>`);
   }
@@ -1643,6 +1717,7 @@ function gate(step, over = false) {
   if (step === 'totp-off') html = gCard('Turn off authenticator app', 'Sign-in will then need only your passphrase.',
     `<form data-step="totp-off">${gField('gcur', 'Passphrase', 'password', 'autocomplete="current-password" required autofocus')}<button class="gbtn">Turn off</button></form>${cancelBtn()}`);
   g.innerHTML = html;
+  if (step === 'signin' && AUTH.lockUntil > Date.now()) { gErr('Too many attempts. Try again in ' + Math.ceil((AUTH.lockUntil - Date.now()) / 1000) + ' seconds.'); setTimeout(() => { if (AUTH.step === 'signin') gate('signin'); }, AUTH.lockUntil - Date.now() + 200); }
   setTimeout(() => g.querySelector('[autofocus]')?.focus(), 30);
 }
 function gErr(msg) { const e = $('#gerr'); if (e) e.textContent = msg; }
@@ -1680,42 +1755,57 @@ $('#gate').addEventListener('submit', async e => {
     }
     if (step === 'recovery') {
       const P = AUTH.pending; gErr('Saving...');
-      const rec = await hashCodes(P.codes);
-      if (P.manage) { S.auth.rec = rec; save(); AUTH.pending = null; closeGate(); renderAll(); toast('New recovery codes saved. Old codes no longer work.'); return; }
-      S.auth = { v: 1, ...(await hashPass(P.pass)), totp: P.totp || null, rec, created: Date.now() };
-      save(); unlock(false); toast('Sign-in is set up'); return;
+      if (P.manage) { S.auth.rec = await wrapCodes(P.codes); save(); AUTH.pending = null; closeGate(); renderAll(); toast(P.forced ? 'Recovery codes saved. Your data is encrypted.' : 'New recovery codes saved. Old codes no longer work.'); return; }
+      S.auth = { v: 2, totp: P.totp || null, created: Date.now() };
+      await setPassphrase(P.pass);
+      S.auth.rec = await wrapCodes(P.codes);
+      save(); unlock(false); toast('Sign-in is set up. Your data is encrypted on this device.'); return;
     }
     if (step === 'signin') {
       if (AUTH.lockUntil > Date.now()) { gErr('Too many attempts. Try again in ' + Math.ceil((AUTH.lockUntil - Date.now()) / 1000) + ' seconds.'); return; }
       gErr('Checking...');
-      const okP = await checkPass($('#gpass').value);
+      const pass = $('#gpass').value;
+      const okP = await checkPass(pass);
       const okC = !S.auth.totp || (libsOk() && totpOk(S.auth.totp, $('#gcode').value));
-      if (okP && okC) { unlock($('#gkeep').checked); return; }
-      AUTH.fails++;
+      if (okP && okC) {
+        gErr('Unlocking...');
+        if (!(await openVault(pass))) { gErr('Your passphrase is correct, but your data could not be decrypted. Try a recovery code.'); return; }
+        unlock($('#gkeep').checked); return;
+      }
+      AUTH.fails++; saveLockout();
       if (S.auth.totp && !libsOk()) gErr('The authenticator library did not load. Use a recovery code instead.');
-      else if (AUTH.fails >= 5) { const wait = 30 * Math.pow(2, AUTH.fails - 5); AUTH.lockUntil = Date.now() + wait * 1000; gErr('Too many attempts. Try again in ' + wait + ' seconds.'); setTimeout(() => { if (AUTH.step === 'signin') gate('signin'); }, wait * 1000); }
+      else if (AUTH.fails >= 5) { const wait = Math.min(3600, 30 * Math.pow(2, AUTH.fails - 5)); AUTH.lockUntil = Date.now() + wait * 1000; saveLockout(); gErr('Too many attempts. Try again in ' + wait + ' seconds.'); setTimeout(() => { if (AUTH.step === 'signin') gate('signin'); }, wait * 1000); }
       else gErr(S.auth.totp ? 'Passphrase or code is incorrect.' : 'That passphrase is incorrect.');
       $('#gpass').select(); return;
     }
     if (step === 'recover') {
+      if (AUTH.lockUntil > Date.now()) { gErr('Too many attempts. Try again in ' + Math.ceil((AUTH.lockUntil - Date.now()) / 1000) + ' seconds.'); return; }
       const c = normCode($('#grec').value); gErr('Checking...');
       for (let i = 0; i < (S.auth.rec || []).length; i++) {
         const r = S.auth.rec[i];
-        if (await pbkdf2(c, r.salt, 20000) === r.hash) { S.auth.rec.splice(i, 1); save(); AUTH.pending = { recovered: true }; gate('reset'); return; }
+        if (r.ct) {
+          const raw = await unwrapDEK(c, r); if (!raw) continue;
+          await setDEK(raw);
+          if (!(await unseal())) { gErr('This code is valid, but the data could not be decrypted.'); return; }
+          S.auth.rec.splice(i, 1); AUTH.pending = { recovered: true }; gate('reset'); return;
+        }
+        if (r.hash && !S.auth.wrap && await pbkdf2(c, r.salt, 20000) === r.hash) { S.auth.rec.splice(i, 1); save(); AUTH.pending = { recovered: true }; gate('reset'); return; }
       }
-      AUTH.fails++; gErr('That recovery code is not valid or was already used.'); return;
+      AUTH.fails++; saveLockout();
+      if (AUTH.fails >= 5) { const wait = Math.min(3600, 30 * Math.pow(2, AUTH.fails - 5)); AUTH.lockUntil = Date.now() + wait * 1000; saveLockout(); gErr('Too many attempts. Try again in ' + wait + ' seconds.'); return; }
+      gErr('That recovery code is not valid or was already used.'); return;
     }
     if (step === 'reset') {
       if (!AUTH.pending || !AUTH.pending.recovered) { gate('signin'); return; }
       const p = newPassFromForm(); if (!p) return;
-      Object.assign(S.auth, await hashPass(p)); save(); unlock(false);
+      await setPassphrase(p); save(); unlock(false);
       toast('Passphrase updated. ' + S.auth.rec.length + ' recovery codes left' + (S.auth.totp ? '. Turn off or reset the authenticator app in Settings if you lost your phone.' : '.'));
       return;
     }
     if (step === 'change') {
       if (!(await checkPass($('#gcur').value))) { gErr('Current passphrase is incorrect.'); return; }
       const p = newPassFromForm(); if (!p) return;
-      Object.assign(S.auth, await hashPass(p)); save();
+      await setPassphrase(p); save();
       try { localStorage.removeItem('daybook:trust'); } catch (x) {}
       AUTH.unlocked = true; touchSession(); closeGate(); renderAll(); toast('Passphrase changed'); return;
     }
@@ -1823,7 +1913,7 @@ function fireAlarm(al, d, key) { ring({ key, kind: 'alarm', label: al.label || '
 
 const GRACE = 15 * 60000;
 function checkAlerts() {
-  if (!S || !AUTH.ready) return;
+  if (!S || !AUTH.ready || ENC.sealed) return;
   const now = Date.now(); S.fired = S.fired || {}; let changed = false; const missed = [];
   const handle = (key, at, fire, label) => {
     if (at > now || S.fired[key]) return;
@@ -1946,7 +2036,7 @@ const NSTATE = { exact: true, perm: 'unknown' };
 function nid(key) { let h2 = 0; for (let i = 0; i < key.length; i++) h2 = (h2 * 31 + key.charCodeAt(i)) | 0; return (Math.abs(h2) % 2000000000) + 1; }
 let nsT = null;
 function nativeSchedule() {
-  if (!LN) return;
+  if (!LN || ENC.sealed) return;
   clearTimeout(nsT);
   nsT = setTimeout(async () => {
     try {
@@ -2005,17 +2095,24 @@ const keepLabel = () => keepMonths() ? keepMonths() + ' months' : 'forever';
 const monthOf = d => d.slice(0, 7);
 const addMonths = (m, n) => { const [y, mo] = m.split('-').map(Number); const d = new Date(y, mo - 1 + n, 1); return d.getFullYear() + '-' + pad(d.getMonth() + 1); };
 const logLocalKey = m => 'daybook:log:' + m;
-function logReadLocal(m) { try { return JSON.parse(localStorage.getItem(logLocalKey(m)) || '[]'); } catch (e) { return []; } }
+async function logDecode(s) {
+  if (!s) return [];
+  if (s.startsWith('enc:')) { if (!ENC.key) throw new Error('locked'); const [, iv, ct] = s.split(':'); return JSON.parse(await decStr({ iv, ct })); }
+  return JSON.parse(s);
+}
+async function logEncode(arr) { const s = JSON.stringify(arr); if (!ENC.key || !S.auth) return s; const c = await encStr(s); return 'enc:' + c.iv + ':' + c.ct; }
+async function logReadLocal(m) { let s = null; try { s = localStorage.getItem(logLocalKey(m)); } catch (e) {} return logDecode(s); }
 async function logEnsure(m) {
   if (LOG.loaded[m]) return LOG.months[m];
-  let arr = logReadLocal(m);
+  let arr;
+  try { arr = await logReadLocal(m); } catch (e) { return []; } // still locked: do not cache, never overwrite
   if (LOG.db) {
     try {
       const qs = await LOG.db.collection('data/users/' + LOG.uid).where('month', '==', m).get();
       if (!qs.empty) {
         const parts = qs.docs.map(d => d.data()).filter(x => x.kind === 'log').sort((a, b) => a.part - b.part);
         LOG.parts[m] = parts.length;
-        const remote = JSON.parse(parts.map(x => x.s).join('') || '[]');
+        let remote; try { remote = await logDecode(parts.map(x => x.s).join('')); } catch (e) { return []; }
         const ids = new Set(remote.map(x => x.id)); const extra = arr.filter(x => !ids.has(x.id) && x.at > (parts[0].updated || 0));
         arr = remote.concat(extra);
         if (extra.length) logSave(m, arr);
@@ -2024,13 +2121,15 @@ async function logEnsure(m) {
   }
   LOG.months[m] = arr; LOG.loaded[m] = true; return arr;
 }
-function logSave(m, arr) {
+async function logSave(m, arr) {
   arr = arr || LOG.months[m] || [];
-  try { localStorage.setItem(logLocalKey(m), JSON.stringify(arr)); } catch (e) { toast('Device storage is full. Older work log entries may not be saved here.'); }
+  if (ENC.sealed) return;
+  const enc = await logEncode(arr);
+  try { localStorage.setItem(logLocalKey(m), enc); } catch (e) { toast('Device storage is full. Older work log entries may not be saved here.'); }
   if (!LOG.db) return;
   clearTimeout(LOG.timers[m]);
   LOG.timers[m] = setTimeout(async () => {
-    const s = JSON.stringify(arr), CH = 200000, n = Math.max(1, Math.ceil(s.length / CH)), now = Date.now();
+    const s = await logEncode(arr), CH = 200000, n = Math.max(1, Math.ceil(s.length / CH)), now = Date.now();
     try {
       for (let i = 0; i < n; i++) await LOG.db.doc('data/users/' + LOG.uid + '/log-' + m + '-' + i).set({ kind: 'log', month: m, part: i, parts: n, updated: now, s: s.slice(i * CH, (i + 1) * CH) });
       for (let i = n; i < (LOG.parts[m] || 0); i++) { try { await LOG.db.doc('data/users/' + LOG.uid + '/log-' + m + '-' + i).delete(); } catch (e) {} }
@@ -2058,12 +2157,18 @@ function logRemove(id) {
 }
 let logMaintDone = '';
 async function logMaintain() {
+  if (ENC.sealed || (S.auth && S.auth.wrap && !ENC.key)) return;
   if (logMaintDone === today()) return; logMaintDone = today();
   // 1. make sure every completed task and focus session is in the log
   const byM = {};
   S.tasks.filter(t => t.done && t.doneAt).forEach(t => { const e = taskEntry(t); (byM[monthOf(e.date)] = byM[monthOf(e.date)] || []).push(e); });
   (S.focus || []).forEach(f => { if (!f.at) return; const tk = S.tasks.find(x => x.id === f.taskId); const e = { id: 'f:' + f.at, type: 'focus', date: f.date, at: f.at, mins: f.mins, title: tk ? tk.title : '' }; (byM[monthOf(e.date)] = byM[monthOf(e.date)] || []).push(e); });
   for (const m of Object.keys(byM)) { const arr = await logEnsure(m); const ids = new Set(arr.map(x => x.id)); const add = byM[m].filter(e => !ids.has(e.id)); if (add.length) { arr.push(...add); logSave(m, arr); } }
+  // 1b. encrypt any months still stored as plain text
+  if (ENC.key && S.auth) {
+    const plain = []; try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && k.startsWith('daybook:log:') && !(localStorage.getItem(k) || '').startsWith('enc:')) plain.push(k.slice(12)); } } catch (e) {}
+    for (const m of plain) { const arr = await logEnsure(m); await logSave(m, arr); }
+  }
   // 2. keep the main task list light: completed tasks older than 30 days live only in the log
   const cut = Date.now() - 30 * 864e5, cutF = ymd(new Date(Date.now() - 60 * 864e5));
   const nT = S.tasks.length, nF = (S.focus || []).length;

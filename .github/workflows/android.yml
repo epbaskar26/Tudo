@@ -11,18 +11,33 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      VERSION_CODE: ${{ github.run_number }}
+      VERSION_NAME: 1.0.${{ github.run_number }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
+
+      - name: Check signing secrets
+        env:
+          KS: ${{ secrets.TUDO_KEYSTORE_BASE64 }}
+          KSP: ${{ secrets.TUDO_KEYSTORE_PASSWORD }}
+          KA: ${{ secrets.TUDO_KEY_ALIAS }}
+          KP: ${{ secrets.TUDO_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KS" ] || [ -z "$KSP" ] || [ -z "$KA" ] || [ -z "$KP" ]; then
+            echo "::error::Signing secrets are missing. Add TUDO_KEYSTORE_BASE64, TUDO_KEYSTORE_PASSWORD, TUDO_KEY_ALIAS and TUDO_KEY_PASSWORD under Settings > Secrets and variables > Actions. See README, 'Signing key'."
+            exit 1
+          fi
 
       - name: Install dependencies
         run: npm ci
@@ -36,18 +51,36 @@ jobs:
           node scripts/prepare-android.mjs
           npx cap sync android
 
-      - name: Build APK
+      - name: Build signed release APK
         working-directory: android
+        env:
+          TUDO_KEYSTORE: ${{ runner.temp }}/tudo-release.jks
+          TUDO_KEYSTORE_PASSWORD: ${{ secrets.TUDO_KEYSTORE_PASSWORD }}
+          TUDO_KEY_ALIAS: ${{ secrets.TUDO_KEY_ALIAS }}
+          TUDO_KEY_PASSWORD: ${{ secrets.TUDO_KEY_PASSWORD }}
         run: |
+          echo "${{ secrets.TUDO_KEYSTORE_BASE64 }}" | base64 -d > "$TUDO_KEYSTORE"
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
-          cp app/build/outputs/apk/debug/app-debug.apk ../Tudo.apk
+          ./gradlew assembleRelease --no-daemon
+          rm -f "$TUDO_KEYSTORE"
+          cp app/build/outputs/apk/release/app-release.apk ../Tudo.apk
+
+      - name: Verify signature and write checksum
+        run: |
+          APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner
+          "$APKSIGNER" verify --print-certs Tudo.apk | tee signer.txt
+          CERT=$(grep -m1 "SHA-256 digest" signer.txt | awk -F': ' '{print $2}')
+          sha256sum Tudo.apk > Tudo.apk.sha256
+          echo "APK_SHA256=$(cut -d' ' -f1 Tudo.apk.sha256)" >> "$GITHUB_ENV"
+          echo "CERT_SHA256=$CERT" >> "$GITHUB_ENV"
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: Tudo-apk
-          path: Tudo.apk
+          path: |
+            Tudo.apk
+            Tudo.apk.sha256
           retention-days: 30
 
       - name: Publish release (used by the download page)
@@ -55,6 +88,14 @@ jobs:
         with:
           tag_name: v1.0.${{ github.run_number }}
           name: Tudo 1.0.${{ github.run_number }}
-          body: Android build from commit ${{ github.sha }}. Install Tudo.apk on your phone.
-          files: Tudo.apk
+          body: |
+            Android release build from commit ${{ github.sha }}.
+
+            APK SHA-256: `${{ env.APK_SHA256 }}`
+            Signing certificate SHA-256: `${{ env.CERT_SHA256 }}`
+
+            The signing certificate stays the same for every release. If it ever changes, do not install the APK.
+          files: |
+            Tudo.apk
+            Tudo.apk.sha256
           make_latest: true
