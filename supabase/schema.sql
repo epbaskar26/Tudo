@@ -27,18 +27,37 @@ drop policy if exists "Own log" on public.tudo_log;
 create policy "Own log" on public.tudo_log for all to authenticated
   using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id);
 
+-- Table access: only signed-in users, only what the app needs (row level security then limits them to their own rows).
+grant usage on schema public to authenticated;
+grant select, insert, update, delete on public.tudo_state, public.tudo_log to authenticated;
+revoke all on public.tudo_state, public.tudo_log from anon;
+revoke truncate, trigger, references on public.tudo_state, public.tudo_log from authenticated;
+
 -- If someone turned on two-step sign-in, their data is only reachable after the code was entered.
+-- The check runs as a security definer function because signed-in users cannot read auth.mfa_factors directly.
+create or replace function public.tudo_aal_ok()
+returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select coalesce(auth.jwt() ->> 'aal', '') = 'aal2'
+      or not exists (
+        select 1 from auth.mfa_factors
+        where user_id = auth.uid() and status = 'verified'
+      );
+$$;
+revoke all on function public.tudo_aal_ok() from public, anon;
+grant execute on function public.tudo_aal_ok() to authenticated;
+
 drop policy if exists "Two-step when enabled" on public.tudo_state;
 create policy "Two-step when enabled" on public.tudo_state as restrictive for all to authenticated
-  using (array[(select auth.jwt() ->> 'aal')] <@ (
-    select case when count(id) > 0 then array['aal2'] else array['aal1', 'aal2'] end
-    from auth.mfa_factors where (select auth.uid()) = user_id and status = 'verified'));
+  using ((select public.tudo_aal_ok())) with check ((select public.tudo_aal_ok()));
 
 drop policy if exists "Two-step when enabled" on public.tudo_log;
 create policy "Two-step when enabled" on public.tudo_log as restrictive for all to authenticated
-  using (array[(select auth.jwt() ->> 'aal')] <@ (
-    select case when count(id) > 0 then array['aal2'] else array['aal1', 'aal2'] end
-    from auth.mfa_factors where (select auth.uid()) = user_id and status = 'verified'));
+  using ((select public.tudo_aal_ok())) with check ((select public.tudo_aal_ok()));
 
 -- Lets a signed-in person delete their own account (their rows are removed with it).
 create or replace function public.delete_my_account()
