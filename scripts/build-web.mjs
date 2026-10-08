@@ -1,7 +1,10 @@
-// Vercel build: copies the web app and the Android download page into dist/ (only these files are served).
-import { mkdirSync, copyFileSync, rmSync } from 'node:fs';
+// Vercel build: writes dist/ (the web app, the Android download page and bundled libraries).
+import { mkdirSync, copyFileSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { loadConfig, transform, VENDOR } from './transform.mjs';
+const cfg = loadConfig();
 rmSync('dist', { recursive: true, force: true });
-mkdirSync('dist', { recursive: true });
-copyFileSync('index.html', 'dist/index.html');
+mkdirSync('dist/lib', { recursive: true });
+for (const [name, src] of Object.entries(VENDOR)) copyFileSync(src, 'dist/lib/' + name);
+writeFileSync('dist/index.html', transform(readFileSync('index.html', 'utf8'), cfg));
 copyFileSync('download.html', 'dist/download.html');
-console.log('dist/ ready');
+console.log('dist/ ready' + (cfg.supabaseUrl ? ' (accounts on: ' + cfg.supabaseUrl + ')' : ' (accounts off: fill in tudo.config.json)'));

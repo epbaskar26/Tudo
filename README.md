@@ -1,6 +1,6 @@
 # Tudo
 
-Tasks, calendar, priority matrix, focus timer, habits, alarms, a work log and a clipboard in one app.
+Tasks, calendar, priority matrix, alarms, a work log and a clipboard in one app, with accounts for you and your friends.
 
 Features: quick add (`Tmrw High New rule`), unfinished tasks move to the next day, a work log of completed tasks (kept 6 to 24 months or forever, with CSV export), alarms up to 60 days ahead, task alerts (notification or alarm), passphrase sign-in with optional authenticator app.
 
@@ -13,6 +13,10 @@ Features: quick add (`Tmrw High New rule`), unfinished tasks move to the next da
 | Path | Purpose |
 |---|---|
 | `index.html` | The whole app (web and Android share this file) |
+| `tudo.config.json` | Supabase project URL and anon key (accounts) |
+| `supabase/schema.sql` | Database tables and access rules |
+| `vendor/` | Bundled Supabase, otpauth and QR code libraries |
+| `scripts/transform.mjs` | Shared build step: config, bundled libraries, CSP |
 | `download.html` | Android download page, served at `/download` |
 | `vercel.json` | Vercel build settings and security headers |
 | `scripts/build-web.mjs` | Copies the web files to `dist/` for Vercel |
@@ -25,6 +29,33 @@ Features: quick add (`Tmrw High New rule`), unfinished tasks move to the next da
 
 Import the repository in Vercel (Add New, Project). Vercel reads `vercel.json`, so no settings need changing.
 Every push to `main` redeploys automatically.
+
+## Accounts with Supabase (one-time setup)
+
+Without this, the app runs in device-only mode with a local passphrase. With it, people sign up and sign in,
+and their tasks sync across their devices. Each person's data is encrypted on their own device before upload,
+so the database (and you, as its owner) only ever see encrypted text.
+
+1. Create a free project at supabase.com (choose a region near you, for example Mumbai).
+2. SQL Editor > New query: paste `supabase/schema.sql` and click Run.
+3. Project Settings > API: copy the Project URL and the anon (or publishable) key into `tudo.config.json`:
+   ```json
+   { "supabaseUrl": "https://abcd1234.supabase.co", "supabaseAnonKey": "eyJ...", "siteUrl": "https://your-site.vercel.app" }
+   ```
+   The anon key is meant to be public; row level security in `schema.sql` keeps each person's rows private.
+4. Authentication > URL Configuration: set Site URL to your Vercel address and add it under Redirect URLs.
+5. Email delivery: Supabase's built-in sender only delivers to your own project team (2 emails per hour).
+   For friends, add a custom SMTP sender under Authentication > Emails > SMTP Settings (Resend, Brevo or
+   Postmark have free tiers). Until then, sign-up confirmation and password reset emails will not reach them.
+6. Optional: Authentication > Providers > Email > minimum password length 10, to match the app.
+7. Commit and push. Vercel redeploys and GitHub builds a new APK with accounts turned on.
+
+Notes:
+- Forgot password works by email link. Because data is encrypted with the password, after a reset the app asks
+  once for the previous password or a recovery code. Without either, the old data cannot be recovered.
+- Two-step sign-in (authenticator app) is available under Settings. When it is on, the database refuses that
+  person's data until the code is entered.
+- Supabase pauses free projects after a week without activity; opening the app regularly keeps it awake.
 
 ## Signing key (required for Android builds)
 
@@ -76,7 +107,7 @@ npm run android:apk      # later builds (debug APK, for testing only)
 
 ## Notes
 
-- Data is stored per browser (web) or per phone (Android). The two do not sync yet. Use the Work log's CSV export as a backup.
+- With Supabase configured, data syncs across devices for each account. Without it, data stays per browser or phone.
 - The sign-in page is a passphrase lock with optional authenticator codes (otpauth, MIT) and recovery codes.
   Passphrases are stored only as PBKDF2-SHA256 hashes.
 - On Android, alarms and task alerts are scheduled as system alarms and ring when the app is closed.

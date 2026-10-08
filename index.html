@@ -71,6 +71,10 @@ body.unpinned #topnav .tn-menu{display:grid}
 .cta{display:flex;align-items:center;gap:6px;padding:7px 14px;border-radius:8px;background:var(--accent);color:var(--accentInk);font-size:12px;font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.1);white-space:nowrap}
 .cta:hover{filter:brightness(1.08)}
 .cta svg{width:14px;height:14px}
+.avatar{width:30px;height:30px;border-radius:50%;background:var(--sel);color:var(--accent);font-size:12px;font-weight:700;display:grid;place-items:center;flex:none}
+.acct{padding:8px 10px 4px;font-size:12.5px;color:var(--ink2);line-height:1.4}
+.acct b{display:block;color:var(--ink);font-size:13px}
+.gqr img{width:100%;height:100%}
 .eyebrow{display:flex;align-items:center;gap:7px;color:var(--accent);font-size:12px;font-weight:600;margin-bottom:4px}
 .eyebrow svg{width:15px;height:15px}
 
@@ -502,6 +506,27 @@ body.gated #topnav,body.gated .app,body.gated #layer>*:not(.toast){display:none!
   #detail.open{width:auto}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+.mdots{display:none}
+@media (max-width:820px){
+  .head{flex-wrap:wrap;align-items:flex-start;gap:10px}
+  .head .grow{flex:1 1 100%}
+  .head .sub{display:none}
+  .head h1{font-size:20px}
+  .calbar{flex:1 1 100%;flex-wrap:wrap;gap:6px}
+  .calbar .seg{flex:1}
+  .calbar .seg button{flex:1;padding:6px 4px}
+  .calwrap{display:block;overflow-y:auto;padding:0 10px 90px}
+  .cal{grid-auto-rows:auto;border-radius:10px}
+  .cal .dow{padding:6px 0;text-align:center;font-size:11px}
+  .cell{min-height:52px;padding:4px 2px;display:flex;flex-direction:column;align-items:center;gap:3px}
+  .cell .d{font-size:13px;min-width:26px;height:26px}
+  .cell .chip,.cell .more{display:none}
+  .mdots{display:flex;gap:3px;align-items:center;flex-wrap:wrap;justify-content:center;max-width:100%}
+  .mdots i{width:6px;height:6px;border-radius:50%;display:block}
+  .mdots b{font-size:9px;color:var(--ink3);font-weight:600}
+  .agenda{margin-top:12px}
+  .wk{margin:0 6px 80px}
+}
 @media (max-width:480px){ .tn-brand,#topnav [data-act="themeflip"]{display:none} #topnav .tn-r{gap:8px} }
 </style>
 </head>
@@ -586,7 +611,7 @@ function fresh() {
       mk('Try quick add: Tmrw High New rule', { due: t, notes: 'Type the day, then the severity, then the task name. Day: Today, Tmrw, a weekday, or Next week. Severity: High, Med, or Low. You can also add a time (17:00), #tag, ^List, or every week.' }),
       mk('Drag a task onto a list in the sidebar to move it', { due: t, listId: work, pri: 2 }),
       mk('Open the calendar and drag tasks between days', { due: addDays(t, 1), listId: work, pri: 1, tags: ['tour'] }),
-      mk('Start a 25-minute focus session', { due: addDays(t, 2), listId: personal, subs: [{ id: uid(), t: 'Pick a task', d: false }, { id: uid(), t: 'Press Start', d: false }] }),
+      mk('Set an alarm on the Alarms tab', { due: addDays(t, 2), listId: personal, subs: [{ id: uid(), t: 'Open Alarms', d: false }, { id: uid(), t: 'Choose New alarm', d: false }] }),
     ],
     habits: [{ id: uid(), name: 'Read 20 minutes', log: {} }, { id: uid(), name: 'Walk', log: {} }],
     focus: [],
@@ -597,6 +622,9 @@ function fresh() {
    Once sign-in is set up, everything except the sign-in record and a few display settings is stored
    encrypted with AES-256-GCM. The data key is random; it is stored only wrapped (encrypted) with a key
    derived from your passphrase (PBKDF2-SHA256) and, separately, with each recovery code. */
+const CFG = window.TUDO_CONFIG || {};
+const SBMODE = !!(CFG.supabaseUrl && CFG.supabaseAnonKey); // accounts via Supabase (Vercel site and Android app)
+const SB = { client: null, user: null, uid: null, lastSync: 0, dirty: false, recovery: false, email: '', retry: null, factorId: null };
 const ENC = { raw: null, key: null, sealed: false };
 let ENV = null; // encrypted envelope waiting to be opened
 const PUB_SETTINGS = ['theme', 'accent', 'font', 'autoLock'];
@@ -640,17 +668,20 @@ async function unseal() {
   return true;
 }
 let S;
-try { const ls = localStorage.getItem('daybook:v1'); if (ls) adoptStored(ls); else S = fresh(); } catch (e) { S = fresh(); }
-const V = { calMode: 'week', view: 'tasks', f: { type: 'smart', id: 'today' }, sel: null, cal: today().slice(0, 7), calSel: today(), collapsed: { done: true }, sort: 'date' };
+if (SBMODE) { let prefs = {}; try { prefs = JSON.parse(localStorage.getItem('tudo:prefs') || '{}'); } catch (e) {} S = emptyState(null, prefs); ENC.sealed = true; }
+else { try { const ls = localStorage.getItem('daybook:v1'); if (ls) adoptStored(ls); else S = fresh(); } catch (e) { S = fresh(); } }
+const V = { calMode: (typeof innerWidth !== 'undefined' && innerWidth <= 820) ? 'month' : 'week', view: 'tasks', f: { type: 'smart', id: 'today' }, sel: null, cal: today().slice(0, 7), calSel: today(), collapsed: { done: true }, sort: 'date' };
 let store = { kind: 'local' }, saveTimer = null, syncText = 'Saved on this device';
 
 function save() {
+  if (SBMODE && !ENC.sealed) SB.dirty = true;
   if (typeof nativeSchedule === 'function') nativeSchedule();
   clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
     if (ENC.sealed) return;
     let str; try { str = await serializeState(); } catch (e) { return; }
     if (ENC.sealed) return;
+    if (SBMODE) { if (SB.uid) await sbSaveState(str); return; }
     try { localStorage.setItem('daybook:v1', str); } catch (e) {}
     if (store.kind === 'db') {
       try { await store.ref.set({ s: str, at: Date.now() }); setSync('Synced to your account'); }
@@ -832,7 +863,7 @@ function rollover() {
   if (n) { save(); setTimeout(() => toast(n === 1 ? 'Moved 1 unfinished task to today' : 'Moved ' + n + ' unfinished tasks to today'), 400); }
   return n;
 }
-function renderAll() { migrate(); rollover(); renderSide(); renderMain(); renderDetail(); }
+function renderAll() { if (V.view === 'focus' || V.view === 'habits') V.view = 'tasks'; migrate(); rollover(); renderSide(); renderMain(); renderDetail(); }
 
 function counts() {
   const t = today(), all = live().filter(x => !x.done);
@@ -843,7 +874,7 @@ function counts() {
     all: all.length,
   };
 }
-const VIEWS = [['tasks', 'Tasks'], ['calendar', 'Calendar'], ['matrix', 'Matrix'], ['focus', 'Focus'], ['habits', 'Habits'], ['alarms', 'Alarms'], ['clip', 'Clipboard']];
+const VIEWS = [['tasks', 'Tasks'], ['calendar', 'Calendar'], ['matrix', 'Matrix'], ['alarms', 'Alarms'], ['clip', 'Clipboard']];
 const VIEW_SUB = { tasks: 'Plan your day, sort by priority, and keep lists in order.', calendar: 'See scheduled tasks by day, week, or month.', matrix: 'Sort open tasks by urgency and importance.', focus: 'Work in timed sessions, then take a short break.', habits: 'Check off a day to build a streak.', clip: 'Paste text on one device and pick it up on another.', alarms: 'Alarms ring while Tudo is open in a browser tab. Schedule them up to 60 days ahead.' };
 if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) VIEW_SUB.alarms = 'Alarms ring on this phone even when Tudo is closed. Schedule them up to 60 days ahead.';
 function isDark() { const th = S.settings.theme || 'auto'; return th === 'dark' || (th === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches); }
@@ -863,6 +894,7 @@ function renderRail() {
     <div class="tn-r">
       ${S.auth ? `<button class="tbtn" data-act="lock" aria-label="Lock Tudo" title="Lock now"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></button>` : ''}
       <button class="tbtn" data-act="settings" aria-label="Settings" title="Settings">${I.gear}</button>
+      ${SBMODE && SB.user ? `<button class="avatar" data-act="settings" aria-label="Account: ${esc(sbName())}" title="${esc(sbName())}">${esc(sbInitials())}</button>` : ''}
       <button class="tbtn" data-act="themeflip" aria-label="${isDark() ? 'Switch to light theme' : 'Switch to dark theme'}" title="${isDark() ? 'Switch to light theme' : 'Switch to dark theme'}">${isDark() ? I.sun : moon}</button>
       <button class="cta" data-act="newtask">${I.plus}<span>New task</span></button>
     </div>`;
@@ -929,8 +961,6 @@ function renderMain() {
   if (V.view === 'tasks') return renderTasks(m);
   if (V.view === 'calendar') return renderCal(m);
   if (V.view === 'matrix') return renderMatrix(m);
-  if (V.view === 'focus') return renderFocus(m);
-  if (V.view === 'habits') return renderHabits(m);
   if (V.view === 'clip') return renderClip(m);
   if (V.view === 'alarms') return renderAlarms(m);
   if (V.view === 'log') return renderLog(m);
@@ -1016,6 +1046,7 @@ function renderMonth(m, bar) {
     const d = new Date(start); d.setDate(start.getDate() + i); const k = ymd(d), items = (byDay[k] || []).sort((a, b) => a.done - b.done || (a.time || '99').localeCompare(b.time || '99'));
     cells += `<div class="cell${d.getMonth() !== mo - 1 ? ' out' : ''}${k === t ? ' today' : ''}${k === V.calSel ? ' sel' : ''}" data-act="calsel" data-d="${k}" data-dropday="${k}">
       <span class="d">${d.getDate()}</span>
+      <span class="mdots">${items.slice(0, 4).map(x => `<i style="background:${taskColor(x)}${x.done ? ';opacity:.4' : ''}"></i>`).join('')}${items.length > 4 ? '<b>+' + (items.length - 4) + '</b>' : ''}</span>
       ${items.slice(0, 3).map(x => `<span class="chip ev${x.done ? ' done' : ''}" style="${evStyle(x)}" draggable="true" data-drag="${x.id}" data-act="sel" data-id="${x.id}" title="${x.time ? x.time + ' ' : ''}${esc(x.title)}">${listEmoji(x)}${esc(x.title)}</span>`).join('')}
       ${items.length > 3 ? `<div class="more">+${items.length - 3} more</div>` : ''}</div>`;
   }
@@ -1458,7 +1489,7 @@ function renderClip(m) {
   const items = clipList();
   if (!CL.sel || !CL.items[CL.sel]) CL.sel = items[0] ? items[0].id : null;
   const c = CL.items[CL.sel];
-  const sub = CL.db ? 'Paste text on one device and it appears on your others. Share a clip to edit it live with others.' : 'Saved on this device.';
+  const sub = CL.db ? 'Paste text on one device and it appears on your others. Share a clip to edit it live with others.' : SBMODE ? 'Paste text on one device and it appears on your others after it syncs.' : 'Saved on this device.';
   m.innerHTML = headHTML('Clipboard', sub, `<button class="btn" data-act="clipnew">New clip</button>`) +
     `<div class="clipwrap${c && V.clipOpen ? ' editing' : ''}"><div class="cliplist" id="cliplist">${clipItemsHTML()}</div>
     <div class="clipedit">${c ? `
@@ -1632,20 +1663,21 @@ function sessionKey() {
   } catch (e) {}
   return null;
 }
-function touchSession() { if (!AUTH.unlocked || !ENC.raw) return; try { sessionStorage.setItem('daybook:unlock', JSON.stringify({ k: sessKey(), at: Date.now(), dk: b64e(ENC.raw) })); } catch (e) {} }
+function touchSession() { if (!AUTH.unlocked || !ENC.raw) return; if (SBMODE) { try { sessionStorage.setItem('tudo:unlock', JSON.stringify({ uid: SB.uid, at: Date.now(), dk: b64e(ENC.raw) })); } catch (e) {} return; } try { sessionStorage.setItem('daybook:unlock', JSON.stringify({ k: sessKey(), at: Date.now(), dk: b64e(ENC.raw) })); } catch (e) {} }
 function unlock(keep) {
   AUTH.unlocked = true; AUTH.fails = 0; AUTH.lockUntil = 0; saveLockout(); AUTH.lastAct = Date.now(); AUTH.pending = null;
   touchSession();
-  if (keep && ENC.raw) { try { localStorage.setItem('daybook:trust', JSON.stringify({ k: sessKey(), until: Date.now() + 7 * 864e5, dk: b64e(ENC.raw) })); } catch (e) {} }
+  if (keep && ENC.raw && SBMODE) { try { localStorage.setItem('tudo:' + SB.uid + ':trust', JSON.stringify({ until: Date.now() + 7 * 864e5, dk: b64e(ENC.raw) })); } catch (e) {} }
+  else if (keep && ENC.raw) { try { localStorage.setItem('daybook:trust', JSON.stringify({ k: sessKey(), until: Date.now() + 7 * 864e5, dk: b64e(ENC.raw) })); } catch (e) {} }
   closeGate(); renderAll(); save();
   logMaintDone = ''; setTimeout(checkAlerts, 300); setTimeout(logMaintain, 800); if (typeof nativeSchedule === 'function') nativeSchedule();
   if (needsCodes()) { AUTH.pending = { codes: makeCodes(), manage: true, forced: true }; gate('recovery', true); }
 }
 function lockApp() {
   AUTH.unlocked = false;
-  try { sessionStorage.removeItem('daybook:unlock'); } catch (e) {}
+  try { sessionStorage.removeItem('daybook:unlock'); sessionStorage.removeItem('tudo:unlock'); } catch (e) {}
   if (V.sel) V.sel = null;
-  gate('signin');
+  gate(SBMODE ? 'sb-unlock' : 'signin');
 }
 function closeGate() { const g = $('#gate'); g.hidden = true; g.innerHTML = ''; g.classList.remove('over'); document.body.classList.remove('gated'); AUTH.step = null; AUTH.over = false; }
 async function authReady() {
@@ -1661,7 +1693,7 @@ document.addEventListener('keydown', () => { AUTH.lastAct = Date.now(); }, true)
 setInterval(() => {
   if (!AUTH.unlocked || !S.auth) return;
   const mins = S.settings.autoLock ?? 15;
-  let trusted = false; try { const t = JSON.parse(localStorage.getItem('daybook:trust') || 'null'); trusted = t && t.k === sessKey() && t.until > Date.now(); } catch (e) {}
+  let trusted = false; try { const t = JSON.parse(localStorage.getItem(SBMODE ? 'tudo:' + SB.uid + ':trust' : 'daybook:trust') || 'null'); trusted = t && (SBMODE || t.k === sessKey()) && t.until > Date.now(); } catch (e) {}
   if (mins && !trusted && Date.now() - AUTH.lastAct > mins * 60000) { lockApp(); toast('Locked after ' + mins + ' minutes without activity'); return; }
   if (Date.now() - AUTH.lastAct < 30000) touchSession();
 }, 15000);
@@ -1673,6 +1705,7 @@ function gCard(title, sub, body, foot = '') {
 const cancelBtn = () => AUTH.over ? '<button type="button" class="gbtn ghost" data-g="cancel">Cancel</button>' : '';
 function strength(p) { let s = 0; if (p.length >= 10) s++; if (p.length >= 14) s++; if (/[a-z]/.test(p) && /[A-Z]/.test(p)) s++; if (/\d/.test(p)) s++; if (/[^A-Za-z0-9]/.test(p)) s++; return s; }
 function gate(step, over = false) {
+  if (step.startsWith('sb-')) return sbGate(step, over);
   const g = $('#gate'); AUTH.step = step; AUTH.over = over;
   g.hidden = false; g.classList.toggle('over', over);
   if (!over) document.body.classList.add('gated');
@@ -1693,7 +1726,7 @@ function gate(step, over = false) {
   }
   if (step === 'recovery') {
     if (!P.codes) P.codes = makeCodes();
-    html = gCard(P.forced ? 'Save your new recovery codes' : 'Save your recovery codes', (P.forced ? 'Your data is now encrypted. Older recovery codes cannot unlock it, so they have been replaced by the codes below. ' : '') + 'If you forget your passphrase or lose your phone, each code lets you sign in once. Store them somewhere safe, like a password manager.',
+    html = gCard(P.sbFirst ? 'Save your recovery codes' : P.forced ? 'Save your new recovery codes' : 'Save your recovery codes', (P.sbFirst ? 'Your tasks are encrypted with your password before they are saved. If you forget your password, one of these codes is the only way to get your data back. ' : P.forced ? 'Your data is now encrypted. Older recovery codes cannot unlock it, so they have been replaced by the codes below. ' : '') + 'If you forget your passphrase or lose your phone, each code lets you sign in once. Store them somewhere safe, like a password manager.',
       `<div class="gcodes">${P.codes.map(c => `<span>${c}</span>`).join('')}</div>
        <button type="button" class="gbtn ghost" data-g="copycodes">Copy codes</button>
        <form data-step="recovery"><label class="gcheck"><input type="checkbox" id="gsaved"> I saved these codes</label><button class="gbtn" id="gfinish" disabled>${P.manage ? 'Use these codes' : 'Finish setup'}</button></form>${P.manage && !P.forced ? cancelBtn() : ''}`);
@@ -1735,6 +1768,7 @@ $('#gate').addEventListener('change', e => { if (e.target.id === 'gsaved') $('#g
 $('#gate').addEventListener('click', async e => {
   const b = e.target.closest('[data-g]'); if (!b) return;
   const k = b.dataset.g;
+  if (k.startsWith('sb-')) return sbClick(k, b);
   if (k === 'cancel') { AUTH.pending = null; closeGate(); renderAll(); }
   if (k === 'skip-totp') { AUTH.pending.totp = null; gate('recovery'); }
   if (k === 'to-recover') gate('recover');
@@ -1745,6 +1779,7 @@ $('#gate').addEventListener('submit', async e => {
   e.preventDefault();
   const f = e.target, step = f.dataset.step, btn = f.querySelector('.gbtn');
   if (btn) btn.disabled = true;
+  if (step.startsWith('sb-')) { try { await sbSubmit(step, f); } catch (x) { gErr(sbMsg(x)); } finally { if (btn && document.body.contains(btn)) btn.disabled = false; } return; }
   try {
     if (step === 'setup') { const p = newPassFromForm(); if (!p) return; AUTH.pending = { pass: p, totp: newTotpSecret() }; gate('totp-setup'); return; }
     if (step === 'totp-setup') {
@@ -1755,6 +1790,7 @@ $('#gate').addEventListener('submit', async e => {
     }
     if (step === 'recovery') {
       const P = AUTH.pending; gErr('Saving...');
+      if (P.sbFirst) { S.auth.rec = await wrapCodes(P.codes); const keep = P.keep; AUTH.pending = null; unlock(keep); await sbFinishImport(); toast('Your account is ready. Your data is encrypted before it leaves this device.'); return; }
       if (P.manage) { S.auth.rec = await wrapCodes(P.codes); save(); AUTH.pending = null; closeGate(); renderAll(); toast(P.forced ? 'Recovery codes saved. Your data is encrypted.' : 'New recovery codes saved. Old codes no longer work.'); return; }
       S.auth = { v: 2, totp: P.totp || null, created: Date.now() };
       await setPassphrase(P.pass);
@@ -2094,7 +2130,8 @@ const keepMonths = () => (S.settings.keepMonths ?? 12);
 const keepLabel = () => keepMonths() ? keepMonths() + ' months' : 'forever';
 const monthOf = d => d.slice(0, 7);
 const addMonths = (m, n) => { const [y, mo] = m.split('-').map(Number); const d = new Date(y, mo - 1 + n, 1); return d.getFullYear() + '-' + pad(d.getMonth() + 1); };
-const logLocalKey = m => 'daybook:log:' + m;
+const LOGPFX = () => SBMODE ? 'tudo:' + SB.uid + ':log:' : 'daybook:log:';
+const logLocalKey = m => LOGPFX() + m;
 async function logDecode(s) {
   if (!s) return [];
   if (s.startsWith('enc:')) { if (!ENC.key) throw new Error('locked'); const [, iv, ct] = s.split(':'); return JSON.parse(await decStr({ iv, ct })); }
@@ -2118,6 +2155,17 @@ async function logEnsure(m) {
         if (extra.length) logSave(m, arr);
       } else if (arr.length) logSave(m, arr);
     } catch (e) {}
+  } else if (SBMODE && SB.uid) {
+    try {
+      const { data, error } = await SB.client.from('tudo_log').select('data, updated_at').eq('user_id', SB.uid).eq('month', m).maybeSingle();
+      if (error) throw error;
+      if (data) {
+        let remote; try { remote = await logDecode(data.data); } catch (e) { return []; }
+        const ids = new Set(remote.map(x => x.id)), rAt = Date.parse(data.updated_at) || 0;
+        const extra = arr.filter(x => !ids.has(x.id) && x.at > rAt);
+        arr = remote.concat(extra); if (extra.length) logSave(m, arr);
+      } else if (arr.length) logSave(m, arr);
+    } catch (e) {}
   }
   LOG.months[m] = arr; LOG.loaded[m] = true; return arr;
 }
@@ -2126,6 +2174,11 @@ async function logSave(m, arr) {
   if (ENC.sealed) return;
   const enc = await logEncode(arr);
   try { localStorage.setItem(logLocalKey(m), enc); } catch (e) { toast('Device storage is full. Older work log entries may not be saved here.'); }
+  if (SBMODE && SB.uid) {
+    clearTimeout(LOG.timers[m]);
+    LOG.timers[m] = setTimeout(async () => { try { const { error } = await SB.client.from('tudo_log').upsert({ user_id: SB.uid, month: m, data: await logEncode(arr), updated_at: new Date().toISOString() }); if (error) throw error; } catch (e) { setTimeout(() => logSave(m), 15000); } }, 800);
+    return;
+  }
   if (!LOG.db) return;
   clearTimeout(LOG.timers[m]);
   LOG.timers[m] = setTimeout(async () => {
@@ -2166,7 +2219,7 @@ async function logMaintain() {
   for (const m of Object.keys(byM)) { const arr = await logEnsure(m); const ids = new Set(arr.map(x => x.id)); const add = byM[m].filter(e => !ids.has(e.id)); if (add.length) { arr.push(...add); logSave(m, arr); } }
   // 1b. encrypt any months still stored as plain text
   if (ENC.key && S.auth) {
-    const plain = []; try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && k.startsWith('daybook:log:') && !(localStorage.getItem(k) || '').startsWith('enc:')) plain.push(k.slice(12)); } } catch (e) {}
+    const plain = []; try { const pf = LOGPFX(); for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && k.startsWith(pf) && !(localStorage.getItem(k) || '').startsWith('enc:')) plain.push(k.slice(pf.length)); } } catch (e) {}
     for (const m of plain) { const arr = await logEnsure(m); await logSave(m, arr); }
   }
   // 2. keep the main task list light: completed tasks older than 30 days live only in the log
@@ -2178,7 +2231,8 @@ async function logMaintain() {
   // 3. remove months older than the retention setting
   const keep = keepMonths(); if (!keep) return;
   const oldest = addMonths(monthOf(today()), -(keep - 1));
-  try { for (let i = localStorage.length - 1; i >= 0; i--) { const k = localStorage.key(i); if (k && k.startsWith('daybook:log:') && k.slice(12) < oldest) localStorage.removeItem(k); } } catch (e) {}
+  try { const pf = LOGPFX(); for (let i = localStorage.length - 1; i >= 0; i--) { const k = localStorage.key(i); if (k && k.startsWith(pf) && k.slice(pf.length) < oldest) localStorage.removeItem(k); } } catch (e) {}
+  if (SBMODE && SB.uid) { try { await SB.client.from('tudo_log').delete().eq('user_id', SB.uid).lt('month', oldest); } catch (e) {} }
   if (LOG.db) { try { const qs = await LOG.db.collection('data/users/' + LOG.uid).where('month', '<', oldest).get(); for (const d of qs.docs) { if (d.data().kind === 'log') await LOG.db.doc('data/users/' + LOG.uid + '/' + d.id).delete(); } } catch (e) {} }
   Object.keys(LOG.months).forEach(m => { if (m < oldest) { delete LOG.months[m]; delete LOG.loaded[m]; } });
 }
@@ -2206,7 +2260,7 @@ async function renderLog(m) {
     <button class="btn ghost" data-act="lognav" data-n="0">Today</button><button class="iconbtn" data-act="lognav" data-n="-1" aria-label="Previous">${I.left}</button><button class="iconbtn" data-act="lognav" data-n="1" aria-label="Next">${I.right}</button>
     <input type="date" id="logdate" value="${V.logDate}" max="${today()}" aria-label="Go to date" style="border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:5px 8px;font-size:13px"></div>`;
   const keep = keepMonths();
-  const shell = (inner) => headHTML(q ? 'Search: ' + V.logQ : logTitle(), `Everything you completed, with focus time. History is kept ${keep ? 'for ' + keep + ' months' : 'forever'} (change in Settings).`, bar) + `<div class="body"><div class="lgwrap">${inner}</div></div>`;
+  const shell = (inner) => headHTML(q ? 'Search: ' + V.logQ : logTitle(), `Everything you completed. History is kept ${keep ? 'for ' + keep + ' months' : 'forever'} (change in Settings).`, bar) + `<div class="body"><div class="lgwrap">${inner}</div></div>`;
   if (!m.querySelector('.lgwrap')) m.innerHTML = shell('<div class="empty">Loading your work log...</div>');
   // months to load: heatmap (26 weeks), the selected range, or everything kept when searching
   const t0 = today(), heatStart = addDays(weekStart(t0), -25 * 7);
@@ -2242,7 +2296,7 @@ async function renderLog(m) {
   m.innerHTML = shell(`
     <div class="lgcard"><div class="heat" role="grid" aria-label="Completed tasks per day, last 26 weeks">${heat}</div>
       <div class="heatfoot"><span>${total26} tasks completed in the last 26 weeks. Pick a square to see that day.</span><span class="lg">Less <i style="background:var(--line)"></i><i class="l1" style="background:color-mix(in srgb,var(--accent) 30%,var(--panel))"></i><i style="background:color-mix(in srgb,var(--accent) 55%,var(--panel))"></i><i style="background:color-mix(in srgb,var(--accent) 78%,var(--panel))"></i><i style="background:var(--accent)"></i> More</span></div></div>
-    <div class="stats4"><div class="stat4"><span>Tasks completed</span><b>${tasks.length}</b></div><div class="stat4"><span>High severity</span><b>${hi}</b></div><div class="stat4"><span>Focus time</span><b>${fmtMins(fm)}</b></div><div class="stat4"><span>Most work in</span><b style="font-size:16px;line-height:1.7">${topList ? esc(topList[0]) : '-'}</b></div></div>
+    <div class="stats4"><div class="stat4"><span>Tasks completed</span><b>${tasks.length}</b></div><div class="stat4"><span>High severity</span><b>${hi}</b></div><div class="stat4"><span>Daily average</span><b>${(tasks.length / Math.max(1, days.size)).toFixed(1)}</b></div><div class="stat4"><span>Most work in</span><b style="font-size:16px;line-height:1.7">${topList ? esc(topList[0]) : '-'}</b></div></div>
     <div class="lgtools"><label class="kpill">${I.search}<input id="logq" placeholder="Search everything you completed" value="${esc(V.logQ || '')}" autocomplete="off"></label>
       <button class="btn ghost" data-act="logcopy" ${tasks.length ? '' : 'disabled'}>Copy as text</button>${canCsv ? `<button class="btn ghost" data-act="logcsv" ${tasks.length ? '' : 'disabled'}>Download CSV</button>` : ''}</div>
     ${dayHTML || `<div class="empty"><b>${q ? 'No completed tasks match' : 'Nothing completed ' + (r === 'day' ? 'on this day' : 'in this ' + r)}</b>${q ? 'Try another word.' : 'Tasks you complete show up here with the time you finished them.'}</div>`}`);
@@ -2266,6 +2320,345 @@ async function logAction(act, a) {
     if (V.logDate > today()) V.logDate = today(); return renderMain(); }
   if (act === 'logcopy') { try { await navigator.clipboard.writeText(logText(V.logRows || [])); toast('Copied. Paste it into a status update or timesheet.'); } catch (e) { toast('Copy was blocked by the browser'); } }
   if (act === 'logcsv') { const blob = new Blob([logCsv(V.logRows || [])], { type: 'text/csv' }); const u = URL.createObjectURL(blob); const ln = document.createElement('a'); ln.href = u; ln.download = 'tudo-work-log-' + (V.logDate || today()) + '.csv'; document.body.appendChild(ln); ln.click(); ln.remove(); setTimeout(() => URL.revokeObjectURL(u), 2000); }
+}
+
+/* ---------- accounts (Supabase) ----------
+   Supabase handles sign-up, sign-in, email confirmation, password reset and two-step codes.
+   Task data is encrypted on the device (AES-256-GCM) before it is uploaded, with a data key wrapped by the
+   account password and by recovery codes, so the database only ever holds ciphertext. */
+const sbKey = k => 'tudo:' + SB.uid + ':' + k;
+const sbName = () => (SB.user && SB.user.user_metadata && SB.user.user_metadata.name) || (SB.user && SB.user.email) || '';
+const sbInitials = () => { const n = sbName().replace(/@.*/, '').trim().split(/[\s._-]+/).filter(Boolean); return ((n[0] || '?')[0] + (n[1] ? n[1][0] : '')).toUpperCase(); };
+const sbSite = () => CFG.siteUrl || (/^https?:\/\/(localhost|127\.)/.test(location.origin) ? '' : location.origin);
+function sbMsg(e) {
+  const m = (e && (e.message || e.error_description || e.msg)) || String(e || '');
+  if (/invalid login credentials/i.test(m)) return 'Email or password is incorrect.';
+  if (/email not confirmed/i.test(m)) return 'Confirm your email first. Check your inbox for the link we sent.';
+  if (/rate limit|too many/i.test(m)) return 'Too many attempts. Wait a few minutes and try again.';
+  if (/failed to fetch|network|load failed/i.test(m)) return "Can't reach the server. Check your internet connection.";
+  if (/already registered|already been registered/i.test(m)) return 'An account with this email already exists. Sign in instead.';
+  if (/password should be|weak password/i.test(m)) return 'Choose a longer, stronger password.';
+  return m || 'Something went wrong. Try again.';
+}
+function sbInit() {
+  if (SB.client || typeof supabase === 'undefined') return;
+  SB.recovery = /type=recovery/.test(location.hash);
+  SB.client = supabase.createClient(CFG.supabaseUrl, CFG.supabaseAnonKey, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, flowType: 'implicit', storageKey: 'tudo-auth' } });
+  SB.client.auth.onAuthStateChange((ev, session) => {
+    if (session && session.user) { SB.user = session.user; SB.uid = session.user.id; }
+    if (ev === 'PASSWORD_RECOVERY') { SB.recovery = true; if (AUTH.ready) gate('sb-newpass'); }
+    if (ev === 'USER_UPDATED' && AUTH.unlocked) renderRail();
+  });
+}
+async function sbNeedsMfa() { try { const { data } = await SB.client.auth.mfa.getAuthenticatorAssuranceLevel(); return !!(data && data.nextLevel === 'aal2' && data.currentLevel !== 'aal2'); } catch (e) { return false; } }
+function sbStoredKey() {
+  try { const t = JSON.parse(localStorage.getItem(sbKey('trust')) || 'null'); if (t && t.until > Date.now() && t.dk) return t.dk; } catch (e) {}
+  try { const s = JSON.parse(sessionStorage.getItem('tudo:unlock') || 'null'); const mins = S.settings.autoLock ?? 15; if (s && s.uid === SB.uid && s.dk && (!mins || Date.now() - s.at < mins * 60000)) return s.dk; } catch (e) {}
+  return null;
+}
+async function sbBoot() {
+  AUTH.ready = true;
+  if (typeof supabase === 'undefined') return gate('sb-error');
+  sbInit();
+  let session = null;
+  try { session = (await SB.client.auth.getSession()).data.session; } catch (e) {}
+  if (SB.recovery) return gate(session ? 'sb-newpass' : 'sb-signin');
+  if (!session) return gate('sb-signin');
+  SB.user = session.user; SB.uid = session.user.id; SB.email = session.user.email;
+  if (location.hash.includes('access_token')) history.replaceState(null, '', location.pathname + location.search);
+  if (await sbNeedsMfa()) return gate('sb-mfa');
+  const dk = sbStoredKey();
+  if (dk) { const r = await sbFetch(); if (r === 'ok') { await setDEK(b64d(dk)); if (await unseal()) return unlock(false); } ENC.raw = null; ENC.key = null; }
+  gate('sb-unlock');
+}
+// Loads the newest encrypted state (server, or this device's unsynced copy). Leaves it sealed.
+async function sbFetch() {
+  let cache = null; try { cache = JSON.parse(localStorage.getItem(sbKey('state')) || 'null'); } catch (e) {}
+  let remote = null, offline = false;
+  try { const { data, error } = await SB.client.from('tudo_state').select('data, updated_at').eq('user_id', SB.uid).maybeSingle(); if (error) throw error; remote = data; } catch (e) { offline = true; }
+  let src = null, at = 0;
+  if (remote) { src = remote.data; at = Date.parse(remote.updated_at) || 0; }
+  if (cache && cache.s && ((!remote && (offline || cache.dirty)) || (cache.dirty && cache.at > at))) { src = cache.s; at = cache.at; SB.dirty = !!cache.dirty; }
+  if (!src) return offline ? 'offline' : 'empty';
+  const env = JSON.parse(src); ENV = env; ENC.sealed = true;
+  S = emptyState(env.auth, env.pub); SB.lastSync = at;
+  return 'ok';
+}
+async function sbSaveState(str) {
+  const at = Date.now();
+  try { localStorage.setItem(sbKey('state'), JSON.stringify({ s: str, at, dirty: true })); localStorage.setItem('tudo:prefs', JSON.stringify(Object.fromEntries(PUB_SETTINGS.map(k => [k, S.settings[k]])))); } catch (e) {}
+  try {
+    const { error } = await SB.client.from('tudo_state').upsert({ user_id: SB.uid, data: str, updated_at: new Date(at).toISOString() });
+    if (error) throw error;
+    SB.lastSync = at; SB.dirty = false;
+    try { localStorage.setItem(sbKey('state'), JSON.stringify({ s: str, at, dirty: false })); } catch (e) {}
+    setSync('Synced to your account');
+  } catch (e) {
+    setSync('Offline. Changes will sync later.');
+    clearTimeout(SB.retry); SB.retry = setTimeout(() => { if (SB.dirty && !ENC.sealed) save(); }, 15000);
+  }
+}
+// Pick up changes made on another device.
+async function sbPull() {
+  if (!SBMODE || !AUTH.unlocked || ENC.sealed || !SB.uid || SB.dirty || document.hidden) return;
+  const a = document.activeElement; if (a && /INPUT|TEXTAREA|SELECT/.test(a.tagName)) return;
+  try {
+    const { data } = await SB.client.from('tudo_state').select('data, updated_at').eq('user_id', SB.uid).maybeSingle();
+    if (!data) return; const at = Date.parse(data.updated_at) || 0; if (at <= SB.lastSync + 500 || SB.dirty) return;
+    const env = JSON.parse(data.data), rest = JSON.parse(await decStr(env));
+    S = rest; S.auth = env.auth; SB.lastSync = at;
+    try { localStorage.setItem(sbKey('state'), JSON.stringify({ s: data.data, at, dirty: false })); } catch (e) {}
+    LOG.months = {}; LOG.loaded = {}; renderAll(); if (typeof nativeSchedule === 'function') nativeSchedule();
+  } catch (e) {}
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) sbPull(); });
+addEventListener('online', () => { if (SBMODE && SB.dirty && !ENC.sealed) save(); });
+setInterval(sbPull, 60000);
+
+// After the account password is known (sign-in, sign-up, password reset): open or create the data.
+async function sbAfterAuth() {
+  const pass = AUTH.pendingPass;
+  gErr('Loading your data...');
+  const r = await sbFetch();
+  if (r === 'offline') { gErr("Can't reach the server and this device has no saved copy yet. Check your connection and try again."); return; }
+  if (r === 'empty') return sbLegacy() ? gate('sb-import') : sbCreateVault();
+  const raw = await unwrapDEK(pass, S.auth.wrap);
+  if (!raw) return gate('sb-restore');
+  await setDEK(raw);
+  if (!(await unseal())) { gErr('Your data could not be decrypted. Try a recovery code.'); return gate('sb-restore'); }
+  AUTH.pendingPass = null; const keep = AUTH.keep; AUTH.keep = false;
+  unlock(keep);
+}
+async function sbCreateVault(keepState) {
+  if (!keepState) S = fresh();
+  S.settings = { ...S.settings };
+  S.auth = { v: 3, sb: true, created: Date.now() };
+  await setDEK(rand32());
+  S.auth.wrap = await wrapDEK(AUTH.pendingPass);
+  ENV = null; ENC.sealed = false;
+  AUTH.pending = { codes: makeCodes(), sbFirst: true, keep: AUTH.keep };
+  AUTH.pendingPass = null; AUTH.keep = false;
+  gate('recovery');
+}
+// Data from before accounts existed (stored only on this device).
+function sbLegacy() { try { return localStorage.getItem('daybook:v1'); } catch (e) { return null; } }
+let SB_IMPORT_LOGS = null;
+async function sbImport(oldPass) {
+  const raw = sbLegacy(); if (!raw) return sbCreateVault();
+  const o = JSON.parse(raw); let state, oldKey = null;
+  if (o.enc) {
+    if (!o.auth || !o.auth.wrap) throw new Error('This data cannot be read.');
+    const k = await unwrapDEK(oldPass || '', o.auth.wrap);
+    if (!k) throw new Error('That passphrase does not unlock the data on this device.');
+    oldKey = await crypto.subtle.importKey('raw', k, 'AES-GCM', false, ['decrypt']);
+    state = JSON.parse(await decStr(o, oldKey));
+  } else { state = o; delete state.auth; }
+  SB_IMPORT_LOGS = {};
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i); if (!key || !key.startsWith('daybook:log:')) continue;
+    const v = localStorage.getItem(key) || '';
+    try { SB_IMPORT_LOGS[key.slice(12)] = v.startsWith('enc:') ? (oldKey ? JSON.parse(await decStr({ iv: v.split(':')[1], ct: v.split(':')[2] }, oldKey)) : []) : JSON.parse(v); } catch (e) {}
+  }
+  S = state; await sbCreateVault(true);
+}
+async function sbFinishImport() {
+  if (!SB_IMPORT_LOGS) return;
+  for (const m of Object.keys(SB_IMPORT_LOGS)) { LOG.months[m] = SB_IMPORT_LOGS[m]; LOG.loaded[m] = true; await logSave(m, SB_IMPORT_LOGS[m]); }
+  SB_IMPORT_LOGS = null;
+  try { for (let i = localStorage.length - 1; i >= 0; i--) { const k = localStorage.key(i); if (k && (k === 'daybook:v1' || k.startsWith('daybook:log:') || k === 'daybook:trust' || k === 'daybook:lockout')) localStorage.removeItem(k); } } catch (e) {}
+  toast('Your existing tasks were moved into your account');
+}
+async function sbSignOut() {
+  try { await SB.client.auth.signOut(); } catch (e) {}
+  try { sessionStorage.removeItem('tudo:unlock'); if (SB.uid) localStorage.removeItem(sbKey('trust')); } catch (e) {}
+  if (LN) { try { const p = await LN.getPending(); if (p.notifications && p.notifications.length) await LN.cancel({ notifications: p.notifications.map(n => ({ id: n.id })) }); } catch (e) {} }
+  ENC.raw = null; ENC.key = null; ENV = null; ENC.sealed = true; AUTH.unlocked = false;
+  S = emptyState(null, S.settings); SB.user = null; SB.uid = null; SB.dirty = false;
+  LOG.months = {}; LOG.loaded = {}; CL.items = {}; CL.sel = null; V.sel = null; V.view = 'tasks';
+  renderAll(); gate('sb-signin');
+}
+function sbSettingsHTML() {
+  return `<div class="mlabel">Account</div><div class="acct"><b>${esc(sbName())}</b>${esc(SB.user ? SB.user.email : '')}</div>
+    <button data-sec="sb-autolock">Auto-lock: ${(S.settings.autoLock ?? 15) ? 'after ' + (S.settings.autoLock ?? 15) + ' min idle' : 'off'}</button>
+    <button data-sec="sb-changepass">Change password</button>
+    <button data-sec="sb-mfa-manage">Two-step sign-in</button>
+    <button data-sec="newcodes">New recovery codes (${(S.auth && S.auth.rec || []).length} left)</button>
+    <button data-sec="sb-signout">Sign out</button>
+    <button data-sec="sb-delete" style="color:var(--over)">Delete account</button>`;
+}
+function sbSetting(k) {
+  if (k === 'sb-signout') return sbSignOut();
+  gate(k, true);
+}
+const pwField = (id, label, ac) => gField(id, label, 'password', `autocomplete="${ac}" required`);
+function sbGate(step, over) {
+  const g = $('#gate'); AUTH.step = step; AUTH.over = over;
+  g.hidden = false; g.classList.toggle('over', over);
+  if (!over) document.body.classList.add('gated');
+  closeLayers();
+  const link = (k, t) => `<button type="button" class="glink" data-g="${k}">${t}</button>`;
+  const meter = '<div class="gmeter"><i id="gmeter" style="width:0"></i></div>';
+  const cancel = over ? '<button type="button" class="gbtn ghost" data-g="cancel">Cancel</button>' : '';
+  let html = '';
+  if (step === 'sb-error') html = gCard('Tudo could not start', 'The sign-in service did not load. Check your internet connection and reload the page.', '<button class="gbtn" type="button" onclick="location.reload()">Reload</button>');
+  if (step === 'sb-signin') html = gCard('Sign in to Tudo', 'Welcome back.',
+    `<form data-step="sb-signin">${gField('gemail', 'Email', 'email', `autocomplete="email" required autofocus value="${esc(SB.email)}"`)}${pwField('gpass', 'Password', 'current-password')}
+     <label class="gcheck"><input type="checkbox" id="gkeep"> Keep me signed in on this device for 7 days</label><button class="gbtn">Sign in</button></form>
+     <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap">${link('sb-to-signup', 'Create an account')}${link('sb-to-forgot', 'Forgot password?')}</div>`);
+  if (step === 'sb-signup') html = gCard('Create your Tudo account', 'Your tasks are encrypted on your device before they are saved, so only you can read them.',
+    `<form data-step="sb-signup">${gField('gname', 'Name', 'text', 'autocomplete="name" required autofocus maxlength="60"')}${gField('gemail', 'Email', 'email', 'autocomplete="email" required')}
+     ${gField('gp1', 'Password (at least 10 characters)', 'password', 'autocomplete="new-password" required')}${meter}${gField('gp2', 'Confirm password', 'password', 'autocomplete="new-password" required')}
+     <button class="gbtn">Create account</button></form>${link('sb-to-signin', 'Already have an account? Sign in')}`);
+  if (step === 'sb-check-email') html = gCard('Check your email', `We sent a confirmation link to <b>${esc(SB.email)}</b>. Open it, then come back here and sign in.`,
+    `<button class="gbtn" type="button" data-g="sb-to-signin">Go to sign in</button><button type="button" class="gbtn ghost" data-g="sb-resend">Send the link again</button>`);
+  if (step === 'sb-forgot') html = gCard('Reset your password', "Enter your account email. We'll send you a link to set a new password.",
+    `<form data-step="sb-forgot">${gField('gemail', 'Email', 'email', `autocomplete="email" required autofocus value="${esc(SB.email)}"`)}<button class="gbtn">Send reset link</button></form>${link('sb-to-signin', 'Back to sign in')}`,
+    '<div class="gfoot">After resetting, you will need your previous password or a recovery code once to unlock your encrypted data.</div>');
+  if (step === 'sb-newpass') html = gCard('Set a new password', 'Use at least 10 characters.',
+    `<form data-step="sb-newpass">${gField('gp1', 'New password', 'password', 'autocomplete="new-password" required autofocus')}${meter}${gField('gp2', 'Confirm new password', 'password', 'autocomplete="new-password" required')}<button class="gbtn">Save password</button></form>`);
+  if (step === 'sb-mfa') html = gCard('Two-step sign-in', 'Enter the 6-digit code from your authenticator app.',
+    `<form data-step="sb-mfa">${gField('gcode', 'Authenticator code', 'text', 'inputmode="numeric" autocomplete="one-time-code" maxlength="7" class="code" required autofocus')}<button class="gbtn">Verify</button></form>${link('sb-signout', 'Sign out')}`);
+  if (step === 'sb-unlock') html = gCard('Unlock Tudo', `Signed in as ${esc(SB.user ? SB.user.email : '')}. Enter your password to open your data.`,
+    `<form data-step="sb-unlock">${pwField('gpass', 'Password', 'current-password')}<label class="gcheck"><input type="checkbox" id="gkeep"> Keep me signed in on this device for 7 days</label><button class="gbtn" ${AUTH.lockUntil > Date.now() ? 'disabled' : ''}>Unlock</button></form>
+     <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap">${link('sb-to-restore', 'Use a recovery code')}${link('sb-signout', 'Sign out')}</div>`);
+  if (step === 'sb-restore') html = gCard('Unlock your data', 'Your password was changed, so your data needs your previous password or one of your recovery codes, once.',
+    `<form data-step="sb-restore">${gField('grest', 'Previous password or recovery code', 'password', 'autocomplete="off" required autofocus')}<button class="gbtn">Unlock</button></form>
+     ${AUTH.pendingPass ? link('sb-startover', 'I have neither. Start over with an empty account.') : ''}${link('sb-signout', 'Sign out')}`);
+  if (step === 'sb-import') { const enc = (() => { try { return !!JSON.parse(sbLegacy()).enc; } catch (e) { return false; } })();
+    html = gCard('Bring your existing tasks?', 'This device has Tudo data from before accounts. You can move it into your new account.',
+      `<form data-step="sb-import">${enc ? gField('gold', 'Passphrase you used on this device', 'password', 'autocomplete="off" required autofocus') : ''}<button class="gbtn">Move my tasks into this account</button></form>
+       <button type="button" class="gbtn ghost" data-g="sb-skip-import">Start with an empty account</button>`); }
+  if (step === 'sb-changepass') html = gCard('Change password', '',
+    `<form data-step="sb-changepass">${pwField('gcur', 'Current password', 'current-password')}${gField('gp1', 'New password', 'password', 'autocomplete="new-password" required')}${meter}${gField('gp2', 'Confirm new password', 'password', 'autocomplete="new-password" required')}<button class="gbtn">Change password</button></form>${cancel}`);
+  if (step === 'sb-delete') html = gCard('Delete your account', 'This permanently deletes your account and all your Tudo data on the server. It cannot be undone.',
+    `<form data-step="sb-delete">${pwField('gcur', 'Password', 'current-password')}${gField('gconfirm', 'Type DELETE to confirm', 'text', 'autocomplete="off" required')}<button class="gbtn" style="background:var(--over)">Delete account</button></form>${cancel}`);
+  if (step === 'sb-mfa-manage') html = gCard('Two-step sign-in', 'Checking...', '');
+  g.innerHTML = html;
+  if (step === 'sb-unlock' && AUTH.lockUntil > Date.now()) { gErr('Too many attempts. Try again in ' + Math.ceil((AUTH.lockUntil - Date.now()) / 1000) + ' seconds.'); setTimeout(() => { if (AUTH.step === 'sb-unlock') gate('sb-unlock'); }, AUTH.lockUntil - Date.now() + 200); }
+  if (step === 'sb-mfa-manage') sbMfaManage(cancel);
+  setTimeout(() => g.querySelector('[autofocus]')?.focus(), 30);
+}
+async function sbMfaManage(cancel) {
+  const g = $('#gate');
+  try {
+    const { data, error } = await SB.client.auth.mfa.listFactors(); if (error) throw error;
+    const on = (data.totp || []).find(f => f.status === 'verified');
+    if (on) {
+      SB.factorId = on.id;
+      g.innerHTML = gCard('Two-step sign-in is on', 'Signing in asks for a code from your authenticator app.', `<button class="gbtn" type="button" data-g="sb-mfa-off" style="background:var(--over)">Turn off two-step sign-in</button>${cancel}`);
+      return;
+    }
+    for (const f of (data.all || [])) if (f.status !== 'verified') { try { await SB.client.auth.mfa.unenroll({ factorId: f.id }); } catch (e) {} }
+    const en = await SB.client.auth.mfa.enroll({ factorType: 'totp', friendlyName: 'Tudo ' + new Date().toISOString().slice(0, 10) + ' ' + Math.random().toString(36).slice(2, 6) });
+    if (en.error) throw en.error;
+    SB.factorId = en.data.id;
+    g.innerHTML = gCard('Add an authenticator app', 'Scan this code with Google Authenticator, Microsoft Authenticator, Authy or any TOTP app, then enter the 6-digit code it shows.',
+      `<div class="gqr"><div class="q"><img alt="QR code for your authenticator app" src="${esc(en.data.totp.qr_code)}"></div><div style="font-size:12px;color:var(--ink3)">Can't scan? Enter this key manually:<div class="gsecret">${esc(en.data.totp.secret.replace(/(.{4})/g, '$1 ').trim())}</div></div></div>
+       <form data-step="sb-mfa-enroll">${gField('gcode', '6-digit code', 'text', 'inputmode="numeric" autocomplete="one-time-code" maxlength="7" class="code" required autofocus')}<button class="gbtn">Turn on</button></form>${cancel}`);
+  } catch (e) { g.innerHTML = gCard('Two-step sign-in', sbMsg(e), cancel); }
+}
+async function sbClick(k) {
+  if (k === 'sb-to-signup') return gate('sb-signup');
+  if (k === 'sb-to-signin') return gate('sb-signin');
+  if (k === 'sb-to-forgot') { const e = $('#gemail'); if (e) SB.email = e.value.trim(); return gate('sb-forgot'); }
+  if (k === 'sb-to-restore') return gate('sb-restore');
+  if (k === 'sb-signout') return sbSignOut();
+  if (k === 'sb-resend') { try { const { error } = await SB.client.auth.resend({ type: 'signup', email: SB.email, options: { emailRedirectTo: sbSite() || undefined } }); if (error) throw error; toast('Confirmation email sent again'); } catch (e) { toast(sbMsg(e)); } return; }
+  if (k === 'sb-skip-import') return sbCreateVault();
+  if (k === 'sb-startover') { if (!confirm('Start over? Your previous tasks stay encrypted and cannot be recovered.')) return; return sbCreateVault(); }
+  if (k === 'sb-mfa-off') { try { const { error } = await SB.client.auth.mfa.unenroll({ factorId: SB.factorId }); if (error) throw error; await SB.client.auth.refreshSession(); closeGate(); renderAll(); toast('Two-step sign-in turned off'); } catch (e) { toast(sbMsg(e)); } }
+}
+async function sbSubmit(step, f) {
+  const v = id => (f.querySelector('#' + id) || {}).value || '';
+  const newPass = () => { const p1 = v('gp1'), p2 = v('gp2'); if (p1.length < 10) { gErr('Use at least 10 characters.'); return null; } if (p1 !== p2) { gErr('The two passwords do not match.'); return null; } return p1; };
+  if (step === 'sb-signin') {
+    SB.email = v('gemail').trim(); gErr('Signing in...');
+    const { data, error } = await SB.client.auth.signInWithPassword({ email: SB.email, password: v('gpass') });
+    if (error) { gErr(sbMsg(error)); if (/not confirmed/i.test(error.message || '')) f.insertAdjacentHTML('afterend', '<button type="button" class="glink" data-g="sb-resend">Send the confirmation link again</button>'); return; }
+    SB.user = data.user; SB.uid = data.user.id; AUTH.pendingPass = v('gpass'); AUTH.keep = f.querySelector('#gkeep').checked;
+    if (await sbNeedsMfa()) return gate('sb-mfa');
+    return sbAfterAuth();
+  }
+  if (step === 'sb-signup') {
+    const p = newPass(); if (!p) return;
+    SB.email = v('gemail').trim(); gErr('Creating your account...');
+    const { data, error } = await SB.client.auth.signUp({ email: SB.email, password: p, options: { data: { name: v('gname').trim() }, emailRedirectTo: sbSite() || undefined } });
+    if (error) { gErr(sbMsg(error)); return; }
+    if (data.session) { SB.user = data.user; SB.uid = data.user.id; AUTH.pendingPass = p; return sbAfterAuth(); }
+    return gate('sb-check-email');
+  }
+  if (step === 'sb-forgot') {
+    SB.email = v('gemail').trim();
+    const { error } = await SB.client.auth.resetPasswordForEmail(SB.email, { redirectTo: sbSite() || undefined });
+    if (error) { gErr(sbMsg(error)); return; }
+    $('#gate').innerHTML = gCard('Check your email', `If an account exists for <b>${esc(SB.email)}</b>, a link to reset the password is on its way. Open it on any device.`, '<button class="gbtn" type="button" data-g="sb-to-signin">Back to sign in</button>');
+    return;
+  }
+  if (step === 'sb-newpass') {
+    const p = newPass(); if (!p) return;
+    const { data, error } = await SB.client.auth.updateUser({ password: p });
+    if (error) { gErr(sbMsg(error)); return; }
+    SB.recovery = false; history.replaceState(null, '', location.pathname + location.search);
+    SB.user = data.user; SB.uid = data.user.id; AUTH.pendingPass = p;
+    toast('Password changed');
+    return sbAfterAuth();
+  }
+  if (step === 'sb-mfa' || step === 'sb-mfa-enroll') {
+    let fid = SB.factorId;
+    if (step === 'sb-mfa') { const { data } = await SB.client.auth.mfa.listFactors(); const fa = (data.totp || []).find(x => x.status === 'verified'); fid = fa && fa.id; }
+    const { error } = await SB.client.auth.mfa.challengeAndVerify({ factorId: fid, code: v('gcode').replace(/\s/g, '') });
+    if (error) { gErr('That code did not match. Use the newest code from your app.'); return; }
+    if (step === 'sb-mfa-enroll') { closeGate(); renderAll(); toast('Two-step sign-in is on'); return; }
+    if (AUTH.pendingPass) return sbAfterAuth();
+    return sbBoot();
+  }
+  if (step === 'sb-unlock') {
+    if (AUTH.lockUntil > Date.now()) return;
+    const pass = v('gpass'); gErr('Unlocking...');
+    if (!ENV || !S.auth) { const r = await sbFetch(); if (r === 'offline') { gErr("Can't reach the server and this device has no saved copy."); return; } if (r === 'empty') { AUTH.pendingPass = pass; AUTH.keep = f.querySelector('#gkeep').checked; return sbLegacy() ? gate('sb-import') : sbCreateVault(); } }
+    const raw = await unwrapDEK(pass, S.auth.wrap);
+    if (raw) { await setDEK(raw); if (await unseal()) return unlock(f.querySelector('#gkeep').checked); }
+    // Not this device's copy? The password may have changed elsewhere: check with the server.
+    const chk = await SB.client.auth.signInWithPassword({ email: SB.user.email, password: pass });
+    if (!chk.error) { AUTH.pendingPass = pass; AUTH.keep = f.querySelector('#gkeep').checked; ENV = null; return sbAfterAuth(); }
+    AUTH.fails++; if (AUTH.fails >= 5) AUTH.lockUntil = Date.now() + Math.min(3600, 30 * Math.pow(2, AUTH.fails - 5)) * 1000; saveLockout();
+    if (AUTH.lockUntil > Date.now()) return gate('sb-unlock');
+    gErr('That password is incorrect.'); return;
+  }
+  if (step === 'sb-restore') {
+    const val = v('grest'); gErr('Checking...');
+    if (!ENV) { const r = await sbFetch(); if (r !== 'ok') { gErr("Can't load your data right now."); return; } }
+    let raw = await unwrapDEK(val, S.auth.wrap), used = -1;
+    if (!raw) for (let i = 0; i < (S.auth.rec || []).length; i++) { const r = S.auth.rec[i]; if (!r.ct) continue; raw = await unwrapDEK(normCode(val), r); if (raw) { used = i; break; } }
+    if (!raw) { gErr('That is not your previous password or a valid recovery code.'); return; }
+    await setDEK(raw); if (!(await unseal())) { gErr('Your data could not be decrypted.'); return; }
+    if (used >= 0) S.auth.rec.splice(used, 1);
+    if (AUTH.pendingPass) { S.auth.wrap = await wrapDEK(AUTH.pendingPass); AUTH.pendingPass = null; }
+    const keep = AUTH.keep; AUTH.keep = false; unlock(keep);
+    toast(used >= 0 ? 'Unlocked with a recovery code. ' + S.auth.rec.length + ' codes left.' : 'Your data is unlocked with your new password.');
+    return;
+  }
+  if (step === 'sb-import') { gErr('Moving your tasks...'); return sbImport(v('gold')); }
+  if (step === 'sb-changepass') {
+    const p = newPass(); if (!p) return;
+    const chk = await SB.client.auth.signInWithPassword({ email: SB.user.email, password: v('gcur') });
+    if (chk.error) { gErr('Current password is incorrect.'); return; }
+    const { error } = await SB.client.auth.updateUser({ password: p });
+    if (error) { gErr(sbMsg(error)); return; }
+    S.auth.wrap = await wrapDEK(p); save();
+    try { localStorage.removeItem(sbKey('trust')); } catch (e) {}
+    closeGate(); renderAll(); toast('Password changed'); return;
+  }
+  if (step === 'sb-delete') {
+    if (v('gconfirm').trim() !== 'DELETE') { gErr('Type DELETE in capital letters to confirm.'); return; }
+    const chk = await SB.client.auth.signInWithPassword({ email: SB.user.email, password: v('gcur') });
+    if (chk.error) { gErr('That password is incorrect.'); return; }
+    const { error } = await SB.client.rpc('delete_my_account');
+    if (error) { gErr(sbMsg(error)); return; }
+    const pf = 'tudo:' + SB.uid + ':';
+    try { for (let i = localStorage.length - 1; i >= 0; i--) { const k = localStorage.key(i); if (k && k.startsWith(pf)) localStorage.removeItem(k); } } catch (e) {}
+    await sbSignOut(); toast('Your account and data were deleted'); return;
+  }
 }
 
 function applyTheme() {
@@ -2292,7 +2685,7 @@ function settingsPop(anchor) {
       <button data-keep="1">Keep work log: ${keepLabel()}</button>
       <div class="mlabel">Theme</div>${[['auto', 'Match system'], ['light', 'Light'], ['dark', 'Dark']].map(([k, n]) => `<button data-th="${k}">${th === k ? '✓ ' : ''}${n}</button>`).join('')}
       ${!NATIVE && !window.claude ? `<div class="mlabel">Apps</div><button data-sec="android">Get the Android app</button>` : ''}
-      ${S.auth ? `<div class="mlabel">Security</div>
+      ${SBMODE ? sbSettingsHTML() : S.auth ? `<div class="mlabel">Security</div>
       <button data-sec="autolock">Auto-lock: ${(S.settings.autoLock ?? 15) ? 'after ' + (S.settings.autoLock ?? 15) + ' min idle' : 'off'}</button>
       <button data-sec="change">Change passphrase</button>
       <button data-sec="${S.auth.totp ? 'totp-off' : 'totp-enable'}">${S.auth.totp ? 'Turn off authenticator app' : 'Set up authenticator app'}</button>
@@ -2315,6 +2708,7 @@ function settingsPop(anchor) {
     if (b.dataset.sec) {
       const k = b.dataset.sec;
       if (k === 'android') { location.href = 'download'; return; }
+      if (k.startsWith('sb-')) { if (k === 'sb-autolock') { const opts = [5, 15, 30, 60, 0], cur = S.settings.autoLock ?? 15; S.settings.autoLock = opts[(opts.indexOf(cur) + 1) % opts.length]; save(); draw(); return; } el.remove(); return sbSetting(k); }
       if (k === 'autolock') { const opts = [5, 15, 30, 60, 0], cur = S.settings.autoLock ?? 15; S.settings.autoLock = opts[(opts.indexOf(cur) + 1) % opts.length]; save(); draw(); return; }
       el.remove();
       if (k === 'signout') { try { localStorage.removeItem('daybook:trust'); } catch (x) {} lockApp(); return; }
@@ -2335,8 +2729,9 @@ setInterval(() => { if (today() !== lastDay) { lastDay = today(); renderAll(); }
 
 applyTheme(); renderAll(); gate('loading');
 let authDecided = false;
-const decideAuth = () => { if (authDecided) return; authDecided = true; authReady(); setTimeout(checkAlerts, 500); setTimeout(logMaintain, 1500); };
-if (NATIVE) { syncText = 'Saved on this phone'; nativeInit(); }
+const decideAuth = () => { if (authDecided) return; authDecided = true; if (SBMODE) sbBoot(); else authReady(); setTimeout(checkAlerts, 500); setTimeout(logMaintain, 1500); };
+if (NATIVE) { syncText = SBMODE ? 'Synced to your account' : 'Saved on this phone'; nativeInit(); }
+if (SBMODE) { syncText = 'Synced to your account'; sbInit(); }
 setTimeout(decideAuth, 6000);
 initStore().finally(decideAuth);
 </script>
