@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Get Tudo for Android</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#F6F8FA;--panel:#FFFFFF;--ink:#121314;--ink2:#3A3B3E;--ink3:#888A8C;--line:#EDEFF1;--accent:#2740CB;--accentInk:#FFFFFF;
+  box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root{--bg:#020617;--panel:#0F172A;--ink:#F1F5F9;--ink2:#CBD5E1;--ink3:#64748B;--line:#1E293B;--accent:#22D3EE;--accentInk:#04121A}}
+*{box-sizing:border-box}
+html{height:100%}
+body{margin:0;min-height:100%;background:var(--bg);color:var(--ink);font:14px/1.55 "Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-feature-settings:'cv11','ss01';letter-spacing:-.005em;-webkit-font-smoothing:antialiased}
+header{display:flex;align-items:center;justify-content:space-between;padding:10px 24px;background:var(--panel);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:10px;color:var(--ink);text-decoration:none}
+.mark{width:32px;height:32px;border-radius:8px;background:var(--accent);color:var(--accentInk);display:grid;place-items:center}
+.brand b{font-size:16px;font-weight:800;letter-spacing:-.025em}
+.ghost{font-size:12px;font-weight:600;color:var(--ink2);text-decoration:none;padding:7px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+main{max-width:760px;margin:0 auto;padding:32px 20px 48px}
+.eyebrow{display:flex;align-items:center;gap:7px;color:var(--accent);font-size:12px;font-weight:600}
+h1{margin:6px 0 6px;font-size:26px;font-weight:700;letter-spacing:-.02em}
+.sub{color:var(--ink2);opacity:.8;margin:0 0 22px;max-width:560px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:14px}
+.dl{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.dl .grow{flex:1;min-width:220px}
+.dl b{font-size:15px}
+.dl small{display:block;color:var(--ink3);font-size:12.5px}
+.cta{display:inline-flex;align-items:center;gap:8px;background:var(--accent);color:var(--accentInk);text-decoration:none;font-weight:600;font-size:14px;padding:11px 18px;border-radius:8px}
+.cta:hover{filter:brightness(1.08)}
+h2{font-size:15px;margin:0 0 10px;font-weight:700}
+ol{margin:0;padding-left:20px;color:var(--ink2)}
+ol li{margin:6px 0}
+.note{font-size:12.5px;color:var(--ink3);margin-top:10px}
+a.link{color:var(--accent);font-weight:600}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+</style>
+</head>
+<body>
+<header>
+  <a class="brand" href="/"><span class="mark"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></svg></span><b>Tudo</b></a>
+  <a class="ghost" href="/">Open the web app</a>
+</header>
+<main>
+  <div class="eyebrow"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M11 18h2"/></svg>Android</div>
+  <h1>Get Tudo for Android</h1>
+  <p class="sub">The Android app works offline, and its alarms and task alerts ring even when the app is closed.</p>
+
+  <div class="card dl">
+    <div class="grow"><b>Tudo.apk</b><small>Latest build for Android 7.0 and newer</small></div>
+    <a class="cta" href="https://github.com/epbaskar26/Tudo/releases/latest/download/Tudo.apk"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0-5-5m5 5 5-5M5 21h14"/></svg>Download APK</a>
+  </div>
+
+  <div class="card">
+    <h2>Install on your phone</h2>
+    <ol>
+      <li>Open this page on your Android phone and tap <b>Download APK</b>.</li>
+      <li>Open the downloaded file. If Android asks, allow your browser or file manager to install unknown apps.</li>
+      <li>Open Tudo, create your passphrase, and save your recovery codes.</li>
+      <li>Allow notifications when asked. On the Alarms tab, tap <b>Allow exact alarms</b> if it appears.</li>
+      <li>On Samsung, Xiaomi, Oppo or Vivo phones, set Tudo's battery usage to <b>Unrestricted</b> (Settings, Apps, Tudo, Battery) so alarms are not delayed.</li>
+    </ol>
+    <p class="note">Data in the Android app is stored only on that phone, separately from the web app. Android may warn that the app is from an unknown developer because it is not installed from Google Play.</p>
+  </div>
+
+  <div class="card">
+    <h2>Updating</h2>
+    <p style="margin:0;color:var(--ink2)">Download and install the latest APK over the existing app. Your tasks and alarms are kept.</p>
+    <p class="note">All builds: <a class="link" href="https://github.com/epbaskar26/Tudo/releases">github.com/epbaskar26/Tudo/releases</a></p>
+  </div>
+</main>
+</body>
+</html>

@@ -1,0 +1,8 @@
+node_modules/
+dist/
+www/
+android/
+.vercel/
+*.keystore
+*.jks
+.DS_Store

@@ -1,0 +1,7 @@
+{
+  "appId": "app.tudo.tasks",
+  "appName": "Tudo",
+  "webDir": "www",
+  "android": { "backgroundColor": "#F6F8FA" },
+  "plugins": { "LocalNotifications": { "smallIcon": "ic_stat_daybook", "iconColor": "#2740CB" } }
+}
