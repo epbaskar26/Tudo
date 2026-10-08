@@ -2375,7 +2375,13 @@ async function sbBoot() {
 async function sbFetch() {
   let cache = null; try { cache = JSON.parse(localStorage.getItem(sbKey('state')) || 'null'); } catch (e) {}
   let remote = null, offline = false;
-  try { const { data, error } = await SB.client.from('tudo_state').select('data, updated_at').eq('user_id', SB.uid).maybeSingle(); if (error) throw error; remote = data; } catch (e) { offline = true; }
+  SB.lastErr = '';
+  try { const { data, error } = await SB.client.from('tudo_state').select('data, updated_at').eq('user_id', SB.uid).maybeSingle(); if (error) throw error; remote = data; }
+  catch (e) {
+    const m = (e && (e.message || e.details || e.hint)) || String(e);
+    if (/failed to fetch|networkerror|load failed|network request failed/i.test(m)) offline = true;
+    else { SB.lastErr = m + (e && e.code ? ' (' + e.code + ')' : ''); console.error('Tudo: loading data failed', e); return 'error'; }
+  }
   let src = null, at = 0;
   if (remote) { src = remote.data; at = Date.parse(remote.updated_at) || 0; }
   if (cache && cache.s && ((!remote && (offline || cache.dirty)) || (cache.dirty && cache.at > at))) { src = cache.s; at = cache.at; SB.dirty = !!cache.dirty; }
@@ -2421,6 +2427,7 @@ async function sbAfterAuth() {
   gErr('Loading your data...');
   const r = await sbFetch();
   if (r === 'offline') { gErr("Can't reach the server and this device has no saved copy yet. Check your connection and try again."); return; }
+  if (r === 'error') { gErr('The database refused the request: ' + SB.lastErr); return; }
   if (r === 'empty') return sbLegacy() ? gate('sb-import') : sbCreateVault();
   const raw = await unwrapDEK(pass, S.auth.wrap);
   if (!raw) return gate('sb-restore');
@@ -2615,7 +2622,7 @@ async function sbSubmit(step, f) {
   if (step === 'sb-unlock') {
     if (AUTH.lockUntil > Date.now()) return;
     const pass = v('gpass'); gErr('Unlocking...');
-    if (!ENV || !S.auth) { const r = await sbFetch(); if (r === 'offline') { gErr("Can't reach the server and this device has no saved copy."); return; } if (r === 'empty') { AUTH.pendingPass = pass; AUTH.keep = f.querySelector('#gkeep').checked; return sbLegacy() ? gate('sb-import') : sbCreateVault(); } }
+    if (!ENV || !S.auth) { const r = await sbFetch(); if (r === 'offline') { gErr("Can't reach the server and this device has no saved copy."); return; } if (r === 'error') { gErr('The database refused the request: ' + SB.lastErr); return; } if (r === 'empty') { AUTH.pendingPass = pass; AUTH.keep = f.querySelector('#gkeep').checked; return sbLegacy() ? gate('sb-import') : sbCreateVault(); } }
     const raw = await unwrapDEK(pass, S.auth.wrap);
     if (raw) { await setDEK(raw); if (await unseal()) return unlock(f.querySelector('#gkeep').checked); }
     // Not this device's copy? The password may have changed elsewhere: check with the server.
