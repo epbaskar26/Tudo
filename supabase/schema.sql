@@ -76,3 +76,23 @@ $$;
 
 revoke all on function public.delete_my_account() from public, anon;
 grant execute on function public.delete_my_account() to authenticated;
+
+-- Daily encrypted backups (kept 30 days) used by Settings > Restore earlier data.
+create table if not exists public.tudo_history (
+  id bigint generated always as identity primary key,
+  user_id uuid not null references auth.users (id) on delete cascade,
+  data text not null check (length(data) < 10000000),
+  note text check (length(note) < 200),
+  created_at timestamptz not null default now()
+);
+create index if not exists tudo_history_user_created on public.tudo_history (user_id, created_at desc);
+alter table public.tudo_history enable row level security;
+grant select, insert, delete on public.tudo_history to authenticated;
+revoke all on public.tudo_history from anon;
+
+drop policy if exists "Own history" on public.tudo_history;
+create policy "Own history" on public.tudo_history for all to authenticated
+  using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id);
+drop policy if exists "Two-step when enabled" on public.tudo_history;
+create policy "Two-step when enabled" on public.tudo_history as restrictive for all to authenticated
+  using ((select public.tudo_aal_ok())) with check ((select public.tudo_aal_ok()));

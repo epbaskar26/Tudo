@@ -507,6 +507,13 @@ body.gated #topnav,body.gated .app,body.gated #layer>*:not(.toast){display:none!
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 .mdots{display:none}
+body{overscroll-behavior-y:contain}
+#ptr{position:fixed;left:50%;top:0;z-index:35;width:38px;height:38px;margin-left:-19px;border-radius:50%;background:var(--panel);border:1px solid var(--line);box-shadow:var(--shadow);display:grid;place-items:center;transform:translateY(-60px);opacity:0;pointer-events:none}
+#ptr span{width:18px;height:18px;border-radius:50%;border:2.5px solid var(--line);border-top-color:var(--accent)}
+#ptr.ready span{border-color:var(--accent)}
+#ptr.spin span{animation:ptrspin .7s linear infinite;border-color:var(--line);border-top-color:var(--accent)}
+@keyframes ptrspin{to{transform:rotate(360deg)}}
+.sidefoot #sync{cursor:pointer}
 @media (max-width:820px){
   .head{flex-wrap:wrap;align-items:flex-start;gap:10px}
   .head .grow{flex:1 1 100%}
@@ -542,6 +549,7 @@ body.gated #topnav,body.gated .app,body.gated #layer>*:not(.toast){display:none!
 <div id="gate" hidden></div>
 <div id="ring" hidden role="alertdialog" aria-modal="true" aria-label="Alarm"></div>
 <div id="notes" aria-live="polite"></div>
+<div id="ptr" aria-hidden="true"><span></span></div>
 <script src="https://cdn.jsdelivr.net/npm/otpauth@9.5.2/dist/otpauth.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@2.0.4/dist/qrcode.js"></script>
 
@@ -624,7 +632,7 @@ function fresh() {
    derived from your passphrase (PBKDF2-SHA256) and, separately, with each recovery code. */
 const CFG = window.TUDO_CONFIG || {};
 const SBMODE = !!(CFG.supabaseUrl && CFG.supabaseAnonKey); // accounts via Supabase (Vercel site and Android app)
-const SB = { client: null, user: null, uid: null, lastSync: 0, dirty: false, recovery: false, email: '', retry: null, factorId: null };
+const SB = { client: null, user: null, uid: null, lastSync: 0, dirty: false, recovery: false, email: '', retry: null, factorId: null, serverAt: null, remoteEnv: null, base: null, pushing: false, again: false };
 const ENC = { raw: null, key: null, sealed: false };
 let ENV = null; // encrypted envelope waiting to be opened
 const PUB_SETTINGS = ['theme', 'accent', 'font', 'autoLock'];
@@ -681,7 +689,7 @@ function save() {
     if (ENC.sealed) return;
     let str; try { str = await serializeState(); } catch (e) { return; }
     if (ENC.sealed) return;
-    if (SBMODE) { if (SB.uid) await sbSaveState(str); return; }
+    if (SBMODE) { if (SB.uid) await sbPush(); return; }
     try { localStorage.setItem('daybook:v1', str); } catch (e) {}
     if (store.kind === 'db') {
       try { await store.ref.set({ s: str, at: Date.now() }); setSync('Synced to your account'); }
@@ -1669,7 +1677,8 @@ function unlock(keep) {
   touchSession();
   if (keep && ENC.raw && SBMODE) { try { localStorage.setItem('tudo:' + SB.uid + ':trust', JSON.stringify({ until: Date.now() + 7 * 864e5, dk: b64e(ENC.raw) })); } catch (e) {} }
   else if (keep && ENC.raw) { try { localStorage.setItem('daybook:trust', JSON.stringify({ k: sessKey(), until: Date.now() + 7 * 864e5, dk: b64e(ENC.raw) })); } catch (e) {} }
-  closeGate(); renderAll(); save();
+  closeGate(); renderAll();
+  if (SBMODE) sbSetBase().then(() => { save(); setTimeout(sbPull, 1500); }); else save();
   logMaintDone = ''; setTimeout(checkAlerts, 300); setTimeout(logMaintain, 800); if (typeof nativeSchedule === 'function') nativeSchedule();
   if (needsCodes()) { AUTH.pending = { codes: makeCodes(), manage: true, forced: true }; gate('recovery', true); }
 }
@@ -1887,13 +1896,35 @@ function schedText(al) {
 let AC = null;
 function audio() { try { if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)(); if (AC.state === 'suspended') AC.resume(); return AC; } catch (e) { return null; } }
 document.addEventListener('pointerdown', () => { audio(); if (RING.cur && !RING.loop) startRingSound(); }, true);
-function tone(ac, f, t0, dur, type = 'sine', vol = .2) { const o = ac.createOscillator(), g = ac.createGain(); o.type = type; o.frequency.value = f; o.connect(g); g.connect(ac.destination); g.gain.setValueAtTime(0, ac.currentTime + t0); g.gain.linearRampToValueAtTime(vol, ac.currentTime + t0 + .02); g.gain.exponentialRampToValueAtTime(.001, ac.currentTime + t0 + dur); o.start(ac.currentTime + t0); o.stop(ac.currentTime + t0 + dur + .02); }
-const SOUNDS = {
-  beep: ac => { [0, .25, .5].forEach(t => tone(ac, 880, t, .18, 'square', .12)); },
-  chime: ac => { [[660, 0], [880, .18], [1320, .36]].forEach(([f, t]) => tone(ac, f, t, .5, 'sine', .22)); },
-  pulse: ac => { [0, .3, .6, .9].forEach((t, i) => tone(ac, 440 + i * 110, t, .25, 'sawtooth', .09)); },
+/* Alarm tones: synthesized here, so they are original and free to use. The same definitions generate the
+   Android sound files at build time (scripts/prepare-android.mjs reads the block between the markers).
+   Each note: [start s, frequency Hz, length s, wave, volume, glide-to Hz or 0]. len = seconds before repeating. */
+/*TONES-START*/
+const TONES = {
+  "beep": { "label": "Classic beep", "len": 1.6, "notes": [[0, 880, 0.18, "square", 0.12, 0], [0.25, 880, 0.18, "square", 0.12, 0], [0.5, 880, 0.18, "square", 0.12, 0]] },
+  "chime": { "label": "Chime", "len": 1.6, "notes": [[0, 660, 0.5, "sine", 0.22, 0], [0.18, 880, 0.5, "sine", 0.22, 0], [0.36, 1320, 0.5, "sine", 0.22, 0]] },
+  "pulse": { "label": "Pulse", "len": 1.6, "notes": [[0, 440, 0.25, "sawtooth", 0.09, 0], [0.3, 550, 0.25, "sawtooth", 0.09, 0], [0.6, 660, 0.25, "sawtooth", 0.09, 0], [0.9, 770, 0.25, "sawtooth", 0.09, 0]] },
+  "digital": { "label": "Digital watch", "len": 1.0, "notes": [[0, 2400, 0.06, "square", 0.07, 0], [0.1, 2400, 0.06, "square", 0.07, 0], [0.2, 2400, 0.06, "square", 0.07, 0], [0.3, 2400, 0.06, "square", 0.07, 0]] },
+  "bell": { "label": "Bell", "len": 2.6, "notes": [[0, 523.25, 2.4, "sine", 0.22, 0], [0, 1046.5, 1.6, "sine", 0.1, 0], [0, 1255.8, 1.2, "sine", 0.07, 0], [0, 1569.8, 0.9, "sine", 0.05, 0], [0, 2197.7, 0.6, "sine", 0.035, 0]] },
+  "marimba": { "label": "Marimba", "len": 1.8, "notes": [[0, 523.25, 0.4, "sine", 0.26, 0], [0, 2093, 0.08, "sine", 0.05, 0], [0.15, 659.25, 0.4, "sine", 0.26, 0], [0.15, 2637, 0.08, "sine", 0.05, 0], [0.3, 783.99, 0.4, "sine", 0.26, 0], [0.3, 3136, 0.08, "sine", 0.05, 0], [0.45, 1046.5, 0.6, "sine", 0.26, 0]] },
+  "rise": { "label": "Gentle rise", "len": 2.6, "notes": [[0, 392, 1.0, "triangle", 0.2, 0], [0.4, 493.88, 1.0, "triangle", 0.2, 0], [0.8, 587.33, 1.4, "triangle", 0.22, 0]] },
+  "birds": { "label": "Birdsong", "len": 1.8, "notes": [[0, 2200, 0.09, "sine", 0.16, 3400], [0.13, 2300, 0.09, "sine", 0.16, 3500], [0.55, 2800, 0.12, "sine", 0.14, 1900], [0.75, 2600, 0.08, "sine", 0.15, 3800], [0.87, 2600, 0.08, "sine", 0.15, 3800]] },
+  "urgent": { "label": "Urgent", "len": 1.0, "notes": [[0, 960, 0.22, "square", 0.1, 0], [0.25, 770, 0.22, "square", 0.1, 0], [0.5, 960, 0.22, "square", 0.1, 0], [0.75, 770, 0.22, "square", 0.1, 0]] }
 };
-function playSound(name) { const ac = audio(); if (ac && ac.state === 'running') (SOUNDS[name] || SOUNDS.beep)(ac); }
+/*TONES-END*/
+const TONE_KEYS = Object.keys(TONES);
+const toneLabel = k => (TONES[k] || TONES.beep).label;
+function tone(ac, f, t0, dur, type = 'sine', vol = .2) { const o = ac.createOscillator(), g = ac.createGain(); o.type = type; o.frequency.value = f; o.connect(g); g.connect(ac.destination); g.gain.setValueAtTime(0, ac.currentTime + t0); g.gain.linearRampToValueAtTime(vol, ac.currentTime + t0 + .02); g.gain.exponentialRampToValueAtTime(.001, ac.currentTime + t0 + dur); o.start(ac.currentTime + t0); o.stop(ac.currentTime + t0 + dur + .02); }
+function playTone(ac, spec) {
+  for (const [t, f, d, w, v, f2] of spec.notes) {
+    const o = ac.createOscillator(), g = ac.createGain(), t0 = ac.currentTime + t;
+    o.type = w; o.frequency.setValueAtTime(f, t0); if (f2) o.frequency.exponentialRampToValueAtTime(f2, t0 + d * 0.8);
+    o.connect(g); g.connect(ac.destination);
+    g.gain.setValueAtTime(0, t0); g.gain.linearRampToValueAtTime(v, t0 + 0.01); g.gain.exponentialRampToValueAtTime(0.001, t0 + d);
+    o.start(t0); o.stop(t0 + d + 0.02);
+  }
+}
+function playSound(name) { const ac = audio(); if (ac && ac.state === 'running') playTone(ac, TONES[name] || TONES.beep); }
 
 /* notifications */
 const canNotify = () => 'Notification' in window;
@@ -1913,7 +1944,7 @@ function startRingSound() {
   clearInterval(RING.loop);
   const ac = audio(); if (!ac || ac.state !== 'running') { RING.loop = null; return; }
   const snd = RING.cur && RING.cur.sound || 'beep';
-  playSound(snd); RING.loop = setInterval(() => playSound(snd), 1600);
+  playSound(snd); RING.loop = setInterval(() => playSound(snd), Math.round((TONES[snd] || TONES.beep).len * 1000));
 }
 function ring(item) {
   if (RING.cur && RING.cur.key === item.key) return;
@@ -2008,7 +2039,7 @@ function alarmModal(al) {
       ${A.repeat === 'custom' ? `<div class="mf"><span>Days</span><div class="daychips">${[1, 2, 3, 4, 5, 6, 0].map(i => `<button data-day="${i}" class="${A.days.includes(i) ? 'on' : ''}" aria-pressed="${A.days.includes(i)}">${DOW[i]}</button>`).join('')}</div></div>` : ''}
       <div class="mrow2"><label class="mf"><span>${A.repeat === 'once' ? 'Date' : 'Starts'}</span><input id="al-start" type="date" min="${t0}" max="${maxD}" value="${A.start}"></label>
         ${A.repeat !== 'once' ? `<label class="mf"><span>Ends (max ${fmtDate(maxD)})</span><input id="al-end" type="date" min="${A.start}" max="${maxD}" value="${A.end}"></label>` : '<span></span>'}</div>
-      <div class="mrow2"><label class="mf"><span>Sound</span><select id="al-sound">${[['beep', 'Beep'], ['chime', 'Chime'], ['pulse', 'Pulse']].map(([k, n]) => `<option value="${k}"${A.sound === k ? ' selected' : ''}>${n}</option>`).join('')}</select></label>
+      <div class="mrow2"><label class="mf"><span>Sound</span><select id="al-sound">${TONE_KEYS.map(k => `<option value="${k}"${A.sound === k ? ' selected' : ''}>${esc(TONES[k].label)}</option>`).join('')}</select></label>
         <label class="mf"><span>Snooze</span><select id="al-snooze">${[5, 10, 15, 30].map(n => `<option value="${n}"${A.snooze === n ? ' selected' : ''}>${n} min</option>`).join('')}</select></label></div>
       <div class="hint" id="al-sum" style="margin:2px 0 6px"></div><div class="merr" id="al-err" role="alert"></div>
       <div class="mrow"><button class="btn ghost" data-m="test">Test sound</button><span style="flex:1"></span><button class="btn ghost" data-m="cancel">Cancel</button><button class="btn" data-m="ok">${al ? 'Save alarm' : 'Create alarm'}</button></div>`;
@@ -2028,7 +2059,7 @@ function alarmModal(al) {
   function summary() { const s = $('#al-sum'); if (!s) return; const n = alarmCount(A), nx = alarmNext(A); s.textContent = n ? (n === 1 ? 'Rings once' : 'Rings ' + n + ' times') + (nx ? ', first at ' + whenText(nx) : '') + '.' : ''; }
   $('#scrim').classList.add('on'); $('#layer').appendChild(el); draw(); setTimeout(() => $('#al-label')?.focus(), 30);
   el.addEventListener('input', () => { read(); summary(); $('#al-err').textContent = ''; });
-  el.addEventListener('change', e => { read(); if (e.target.id === 'al-rep') { A.repeat = e.target.value; if (A.repeat !== 'once' && (!A.end || A.end < A.start)) A.end = maxD; draw(); } else if (e.target.id === 'al-start' && $('#al-end')) { $('#al-end').min = A.start; if (A.end < A.start) { A.end = A.start; $('#al-end').value = A.end; } summary(); } else summary(); });
+  el.addEventListener('change', e => { read(); if (e.target.id === 'al-sound') { audio(); playSound(A.sound); } if (e.target.id === 'al-rep') { A.repeat = e.target.value; if (A.repeat !== 'once' && (!A.end || A.end < A.start)) A.end = maxD; draw(); } else if (e.target.id === 'al-start' && $('#al-end')) { $('#al-end').min = A.start; if (A.end < A.start) { A.end = A.start; $('#al-end').value = A.end; } summary(); } else summary(); });
   el.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Escape') closeLayers(); if (e.key === 'Enter' && e.target.tagName === 'INPUT') el.querySelector('[data-m="ok"]').click(); });
   el.addEventListener('click', e => {
     const b = e.target.closest('button'); if (!b) return;
@@ -2069,6 +2100,7 @@ const NATIVE = !!(window.Capacitor && window.Capacitor.isNativePlatform && windo
 const LN = NATIVE && Capacitor.Plugins ? Capacitor.Plugins.LocalNotifications : null;
 const CapApp = NATIVE && Capacitor.Plugins ? Capacitor.Plugins.App : null;
 const NSTATE = { exact: true, perm: 'unknown' };
+const toneChannel = k => 'tudo-alarm-' + (TONES[k] ? k : 'beep');
 function nid(key) { let h2 = 0; for (let i = 0; i < key.length; i++) h2 = (h2 * 31 + key.charCodeAt(i)) | 0; return (Math.abs(h2) % 2000000000) + 1; }
 let nsT = null;
 function nativeSchedule() {
@@ -2077,9 +2109,9 @@ function nativeSchedule() {
   nsT = setTimeout(async () => {
     try {
       const now = Date.now(), lim = now + (MAX_DAYS + 1) * 864e5, items = [];
-      S.tasks.forEach(t => { const at = taskAlertAt(t); if (at && at > now && at < lim) items.push({ key: 't:' + t.id + ':' + at, at, title: (t.alert === 'alarm' ? '⏰ ' : '') + t.title, body: 'Due ' + fmtDate(t.due) + ' ' + (t.time || '09:00'), ch: t.alert === 'alarm' ? 'daybook-alarms' : 'daybook-reminders', extra: { taskId: t.id } }); });
-      (S.alarms || []).forEach(al => { let a = now; for (let i = 0; i < MAX_DAYS + 2; i++) { const n = alarmNext(al, a); if (!n || n > lim) break; items.push({ key: 'a:' + al.id + ':' + n, at: n, title: '⏰ ' + (al.label || 'Alarm'), body: al.time + ', ' + schedText(al), ch: 'daybook-alarms', extra: { alarm: al.id } }); a = n; } });
-      (S.snooze || []).forEach(x => { if (x.at > now) items.push({ key: 's:' + x.key + ':' + x.at, at: x.at, title: '⏰ ' + x.label, body: 'Snoozed alarm', ch: 'daybook-alarms', extra: {} }); });
+      S.tasks.forEach(t => { const at = taskAlertAt(t); if (at && at > now && at < lim) items.push({ key: 't:' + t.id + ':' + at, at, title: (t.alert === 'alarm' ? '⏰ ' : '') + t.title, body: 'Due ' + fmtDate(t.due) + ' ' + (t.time || '09:00'), ch: t.alert === 'alarm' ? toneChannel(S.settings.taskSound) : 'daybook-reminders', extra: { taskId: t.id } }); });
+      (S.alarms || []).forEach(al => { let a = now; for (let i = 0; i < MAX_DAYS + 2; i++) { const n = alarmNext(al, a); if (!n || n > lim) break; items.push({ key: 'a:' + al.id + ':' + n, at: n, title: '⏰ ' + (al.label || 'Alarm'), body: al.time + ', ' + schedText(al), ch: toneChannel(al.sound), extra: { alarm: al.id } }); a = n; } });
+      (S.snooze || []).forEach(x => { if (x.at > now) items.push({ key: 's:' + x.key + ':' + x.at, at: x.at, title: '⏰ ' + x.label, body: 'Snoozed alarm', ch: toneChannel(x.sound), extra: {} }); });
       items.sort((a, b) => a.at - b.at);
       const pend = await LN.getPending();
       if (pend.notifications && pend.notifications.length) await LN.cancel({ notifications: pend.notifications.map(n => ({ id: n.id })) });
@@ -2096,7 +2128,8 @@ async function nativeCheckPerms() {
 async function nativeInit() {
   if (!LN) return;
   try {
-    await LN.createChannel({ id: 'daybook-alarms', name: 'Alarms', description: 'Alarms and task alarms', importance: 5, visibility: 0, sound: 'alarm.wav', vibration: true, lights: true, lightColor: '#2740CB' });
+    for (const k of TONE_KEYS) await LN.createChannel({ id: toneChannel(k), name: 'Alarm: ' + TONES[k].label, description: 'Alarms that use the ' + TONES[k].label + ' tone', importance: 5, visibility: 0, sound: 'tone_' + k + '.wav', vibration: true, lights: true, lightColor: '#2740CB' });
+    try { await LN.deleteChannel({ id: 'daybook-alarms' }); } catch (e) {}
     await LN.createChannel({ id: 'daybook-reminders', name: 'Task notifications', description: 'Task reminders', importance: 4, visibility: 0, sound: 'chime.wav', vibration: true });
     await nativeCheckPerms();
     if (NSTATE.perm !== 'granted') { const r = await LN.requestPermissions(); NSTATE.perm = r.display; }
@@ -2108,7 +2141,7 @@ async function nativeInit() {
     });
   } catch (e) { console.warn('Native init failed', e); }
   if (CapApp) {
-    CapApp.addListener('appStateChange', async s => { if (s.isActive) { await nativeCheckPerms(); checkAlerts(); nativeSchedule(); if (V.view === 'alarms') renderMain(); } });
+    CapApp.addListener('appStateChange', async s => { if (s.isActive) { await nativeCheckPerms(); if (SBMODE) await sbPull(true); checkAlerts(); nativeSchedule(); if (V.view === 'alarms') renderMain(); } });
     CapApp.addListener('backButton', () => {
       if (RING.cur) return;
       if ($('#layer .modal,#layer .ctx')) return closeLayers();
@@ -2125,7 +2158,7 @@ async function nativeInit() {
 /* ---------- work log: completed tasks and focus sessions, kept by month ----------
    Stored outside the main state so history can grow: one record per month
    (split into parts under 200 KB) in the account store on claude.ai, and in localStorage everywhere. */
-const LOG = { months: {}, loaded: {}, parts: {}, timers: {}, db: null, uid: null };
+const LOG = { months: {}, loaded: {}, parts: {}, timers: {}, db: null, uid: null, tomb: new Set() };
 const keepMonths = () => (S.settings.keepMonths ?? 12);
 const keepLabel = () => keepMonths() ? keepMonths() + ' months' : 'forever';
 const monthOf = d => d.slice(0, 7);
@@ -2161,9 +2194,9 @@ async function logEnsure(m) {
       if (error) throw error;
       if (data) {
         let remote; try { remote = await logDecode(data.data); } catch (e) { return []; }
-        const ids = new Set(remote.map(x => x.id)), rAt = Date.parse(data.updated_at) || 0;
-        const extra = arr.filter(x => !ids.has(x.id) && x.at > rAt);
-        arr = remote.concat(extra); if (extra.length) logSave(m, arr);
+        const ids = new Set(remote.map(x => x.id));
+        const extra = arr.filter(x => !ids.has(x.id) && !LOG.tomb.has(x.id));
+        arr = remote.filter(x => !LOG.tomb.has(x.id)).concat(extra); if (extra.length) logSave(m, arr);
       } else if (arr.length) logSave(m, arr);
     } catch (e) {}
   }
@@ -2176,7 +2209,18 @@ async function logSave(m, arr) {
   try { localStorage.setItem(logLocalKey(m), enc); } catch (e) { toast('Device storage is full. Older work log entries may not be saved here.'); }
   if (SBMODE && SB.uid) {
     clearTimeout(LOG.timers[m]);
-    LOG.timers[m] = setTimeout(async () => { try { const { error } = await SB.client.from('tudo_log').upsert({ user_id: SB.uid, month: m, data: await logEncode(arr), updated_at: new Date().toISOString() }); if (error) throw error; } catch (e) { setTimeout(() => logSave(m), 15000); } }, 800);
+    LOG.timers[m] = setTimeout(async () => {
+      try {
+        // Merge with the server's copy so entries added on other devices are kept.
+        const cur = LOG.months[m] || arr;
+        const { data, error: e1 } = await SB.client.from('tudo_log').select('data').eq('user_id', SB.uid).eq('month', m).maybeSingle();
+        if (e1) throw e1;
+        let merged = cur;
+        if (data) { const remote = await logDecode(data.data), ids = new Set(cur.map(x => x.id)); const extra = remote.filter(x => !ids.has(x.id) && !LOG.tomb.has(x.id)); if (extra.length) { merged = cur.concat(extra); LOG.months[m] = merged; try { localStorage.setItem(logLocalKey(m), await logEncode(merged)); } catch (x) {} } }
+        const { error } = await SB.client.from('tudo_log').upsert({ user_id: SB.uid, month: m, data: await logEncode(merged), updated_at: new Date().toISOString() });
+        if (error) throw error;
+      } catch (e) { setTimeout(() => logSave(m), 15000); }
+    }, 800);
     return;
   }
   if (!LOG.db) return;
@@ -2204,7 +2248,7 @@ function logAddFocus(f) {
   logEnsure(m).then(arr => { if (!arr.some(x => x.id === e.id)) { arr.push(e); logSave(m, arr); } });
 }
 function logRemove(id) {
-  if (!id) return; const ts = Number(String(id).split(':').pop()); if (!ts) return;
+  if (!id) return; LOG.tomb.add(id); const ts = Number(String(id).split(':').pop()); if (!ts) return;
   const m = monthOf(ymd(new Date(ts)));
   logEnsure(m).then(arr => { const i = arr.findIndex(x => x.id === id); if (i >= 0) { arr.splice(i, 1); logSave(m, arr); if (V.view === 'log') renderMain(); } });
 }
@@ -2384,42 +2428,175 @@ async function sbFetch() {
   }
   let src = null, at = 0;
   if (remote) { src = remote.data; at = Date.parse(remote.updated_at) || 0; }
+  SB.serverAt = remote ? remote.updated_at : null; SB.remoteEnv = remote ? remote.data : null; SB.base = null;
   if (cache && cache.s && ((!remote && (offline || cache.dirty)) || (cache.dirty && cache.at > at))) { src = cache.s; at = cache.at; SB.dirty = !!cache.dirty; }
+  // This device's copy differs from the server's and is not being used: keep it so it can be restored.
+  if (cache && cache.s && remote && src !== cache.s && cache.s !== remote.data) verKeep(cache.s, cache.at, 'This device, before sync');
   if (!src) return offline ? 'offline' : 'empty';
   const env = JSON.parse(src); ENV = env; ENC.sealed = true;
   S = emptyState(env.auth, env.pub); SB.lastSync = at;
   return 'ok';
 }
-async function sbSaveState(str) {
-  const at = Date.now();
-  try { localStorage.setItem(sbKey('state'), JSON.stringify({ s: str, at, dirty: true })); localStorage.setItem('tudo:prefs', JSON.stringify(Object.fromEntries(PUB_SETTINGS.map(k => [k, S.settings[k]])))); } catch (e) {}
+/* ---------- conflict-safe sync ----------
+   The server row is only replaced if nobody else changed it since this device last saw it
+   (compare-and-swap on updated_at). Otherwise this device downloads the newer copy, merges its own
+   changes into it field by field (three-way, against the copy both started from) and tries again. */
+const clone = o => JSON.parse(JSON.stringify(o));
+const J = o => JSON.stringify(o);
+function mergeFields(b, l, r) {
+  const o = { ...(r || {}) };
+  for (const k of new Set([...Object.keys(l || {}), ...Object.keys(b || {})])) {
+    if (J(l ? l[k] : undefined) !== J(b ? b[k] : undefined)) { if (l && k in l) o[k] = l[k]; else delete o[k]; }
+  }
+  return o;
+}
+function mergeList(b = [], l = [], r = [], key = 'id') {
+  const kf = x => x && x[key];
+  const B = new Map(b.map(x => [kf(x), x])), L = new Map(l.map(x => [kf(x), x])), R = new Map(r.map(x => [kf(x), x]));
+  const out = new Map(R);
+  for (const [id, lx] of L) {
+    const bx = B.get(id), rx = R.get(id);
+    if (!bx) { out.set(id, rx ? mergeFields({}, lx, rx) : lx); continue; } // added here
+    if (J(lx) === J(bx)) continue;                                        // not changed here
+    if (!rx) continue;                                                    // removed elsewhere: keep removed
+    out.set(id, mergeFields(bx, lx, rx));                                 // changed here: apply only the changed fields
+  }
+  for (const [id, bx] of B) if (!L.has(id) && R.has(id) && J(R.get(id)) === J(bx)) out.delete(id); // removed here
+  return [...out.values()];
+}
+const LIST_KEYS = { tasks: 'id', lists: 'id', alarms: 'id', clips: 'id', habits: 'id', snooze: 'key' };
+function mergeState(b, l, r) {
+  b = b || {};
+  const o = {};
+  for (const k of new Set([...Object.keys(l), ...Object.keys(r)])) {
+    if (k in LIST_KEYS && (Array.isArray(l[k]) || Array.isArray(r[k]))) o[k] = mergeList(b[k], l[k] || [], r[k] || [], LIST_KEYS[k]);
+    else if (k === 'fired') o[k] = { ...(r.fired || {}), ...(l.fired || {}) };
+    else if (k === 'settings') o[k] = mergeFields(b.settings, l.settings, r.settings);
+    else o[k] = J(l[k]) !== J(b[k]) ? l[k] : r[k];
+  }
+  return o;
+}
+async function sbDecodeRow(str) { const env = JSON.parse(str); const st = JSON.parse(await decStr(env)); st.auth = env.auth; return st; }
+async function sbSetBase() { // after unlocking: remember the server copy this device started from
+  try { SB.base = SB.remoteEnv ? await sbDecodeRow(SB.remoteEnv) : null; } catch (e) { SB.base = null; }
+  SB.remoteEnv = null;
+}
+async function sbPush() {
+  if (SB.pushing) { SB.again = true; return; }
+  SB.pushing = true;
   try {
-    const { error } = await SB.client.from('tudo_state').upsert({ user_id: SB.uid, data: str, updated_at: new Date(at).toISOString() });
-    if (error) throw error;
-    SB.lastSync = at; SB.dirty = false;
-    try { localStorage.setItem(sbKey('state'), JSON.stringify({ s: str, at, dirty: false })); } catch (e) {}
-    setSync('Synced to your account');
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (ENC.sealed) return;
+      const str = await serializeState(), at = Date.now(), iso = new Date(at).toISOString();
+      try { localStorage.setItem(sbKey('state'), JSON.stringify({ s: str, at, dirty: true })); localStorage.setItem('tudo:prefs', JSON.stringify(Object.fromEntries(PUB_SETTINGS.map(k => [k, S.settings[k]])))); } catch (e) {}
+      let res;
+      if (SB.serverAt) res = await SB.client.from('tudo_state').update({ data: str, updated_at: iso }).eq('user_id', SB.uid).eq('updated_at', SB.serverAt).select('updated_at');
+      else res = await SB.client.from('tudo_state').insert({ user_id: SB.uid, data: str, updated_at: iso }).select('updated_at');
+      if (res.error && res.error.code !== '23505') throw res.error;
+      if (!res.error && res.data && res.data.length) {
+        SB.serverAt = res.data[0].updated_at; SB.lastSync = at; SB.dirty = false;
+        SB.base = clone(S);
+        try { localStorage.setItem(sbKey('state'), JSON.stringify({ s: str, at, dirty: false })); } catch (e) {}
+        setSync('Synced ' + hm(Date.now()));
+        verDaily(str);
+        return;
+      }
+      // Someone else saved first: fetch their copy and merge this device's changes into it.
+      const { data, error } = await SB.client.from('tudo_state').select('data, updated_at').eq('user_id', SB.uid).maybeSingle();
+      if (error) throw error;
+      if (!data) { SB.serverAt = null; continue; }
+      const remote = await sbDecodeRow(data.data);
+      verKeep(str, at, 'This device, before merging with another device');
+      const merged = mergeState(SB.base, S, remote);
+      S = clone(merged); SB.base = clone(remote); SB.serverAt = data.updated_at;
+      LOG.months = {}; LOG.loaded = {};
+      if (AUTH.unlocked) { const a = document.activeElement; if (!(a && /INPUT|TEXTAREA/.test(a.tagName))) renderAll(); }
+      if (typeof nativeSchedule === 'function') nativeSchedule();
+    }
+    throw new Error('Too many sync conflicts');
   } catch (e) {
+    console.warn('Tudo sync failed', e);
     setSync('Offline. Changes will sync later.');
     clearTimeout(SB.retry); SB.retry = setTimeout(() => { if (SB.dirty && !ENC.sealed) save(); }, 15000);
+  } finally {
+    SB.pushing = false;
+    if (SB.again) { SB.again = false; save(); }
   }
 }
-// Pick up changes made on another device.
-async function sbPull() {
-  if (!SBMODE || !AUTH.unlocked || ENC.sealed || !SB.uid || SB.dirty || document.hidden) return;
-  const a = document.activeElement; if (a && /INPUT|TEXTAREA|SELECT/.test(a.tagName)) return;
+// Pick up changes made on another device (merging in anything not yet uploaded from this one).
+async function sbPull(force) {
+  if (!SBMODE || ENC.sealed || !SB.uid || SB.pushing || !ENC.key) return false;
+  if (!force && AUTH.unlocked && !document.hidden) { const a = document.activeElement; if (a && /INPUT|TEXTAREA|SELECT/.test(a.tagName)) return false; }
   try {
     const { data } = await SB.client.from('tudo_state').select('data, updated_at').eq('user_id', SB.uid).maybeSingle();
-    if (!data) return; const at = Date.parse(data.updated_at) || 0; if (at <= SB.lastSync + 500 || SB.dirty) return;
-    const env = JSON.parse(data.data), rest = JSON.parse(await decStr(env));
-    S = rest; S.auth = env.auth; SB.lastSync = at;
-    try { localStorage.setItem(sbKey('state'), JSON.stringify({ s: data.data, at, dirty: false })); } catch (e) {}
-    LOG.months = {}; LOG.loaded = {}; renderAll(); if (typeof nativeSchedule === 'function') nativeSchedule();
+    if (!data || data.updated_at === SB.serverAt) { setSync('Synced ' + hm(Date.now())); return false; }
+    const remote = await sbDecodeRow(data.data);
+    S = clone(SB.dirty ? mergeState(SB.base, S, remote) : remote);
+    SB.base = clone(remote); SB.serverAt = data.updated_at; SB.lastSync = Date.parse(data.updated_at) || Date.now();
+    if (!SB.dirty) try { localStorage.setItem(sbKey('state'), JSON.stringify({ s: data.data, at: SB.lastSync, dirty: false })); } catch (e) {}
+    LOG.months = {}; LOG.loaded = {};
+    if (AUTH.unlocked) renderAll();
+    if (typeof nativeSchedule === 'function') nativeSchedule();
+    if (SB.dirty) save();
+    setSync('Synced ' + hm(Date.now()));
+    return true;
+  } catch (e) { return false; }
+}
+
+/* ---------- version history (recovery) ----------
+   Earlier copies are kept on this device (last 10) and, if the tudo_history table exists, on the server
+   (one per day, 30 days). Restoring brings back missing items without removing anything current. */
+function verLoad() { try { return JSON.parse(localStorage.getItem(sbKey('versions')) || '[]'); } catch (e) { return []; } }
+function verKeep(s, at, note) {
+  if (!SB.uid || !s) return;
+  const v = verLoad(); if (v.some(x => x.s === s)) return;
+  v.unshift({ s, at: at || Date.now(), note }); while (v.length > 10) v.pop();
+  for (let n = v.length; n > 0; n--) { try { localStorage.setItem(sbKey('versions'), JSON.stringify(v.slice(0, n))); return; } catch (e) {} }
+}
+async function verDaily(str) {
+  const k = sbKey('histday'); let last = ''; try { last = localStorage.getItem(k) || ''; } catch (e) {}
+  if (last === today()) return;
+  verKeep(str, Date.now(), 'Daily copy on this device');
+  try {
+    const { error } = await SB.client.from('tudo_history').insert({ user_id: SB.uid, data: str, note: 'Daily backup' });
+    if (!error) {
+      try { localStorage.setItem(k, today()); } catch (e) {}
+      await SB.client.from('tudo_history').delete().eq('user_id', SB.uid).lt('created_at', new Date(Date.now() - 30 * 864e5).toISOString());
+    }
   } catch (e) {}
 }
+async function verList() {
+  const out = verLoad().map(x => ({ ...x, src: 'device' }));
+  try { const { data } = await SB.client.from('tudo_history').select('id, data, note, created_at').eq('user_id', SB.uid).order('created_at', { ascending: false }).limit(30); (data || []).forEach(r => out.push({ s: r.data, at: Date.parse(r.created_at), note: r.note || 'Backup', src: 'server' })); } catch (e) {}
+  const cur = new Set(S.tasks.map(t => t.id));
+  for (const v of out) {
+    try { const st = await sbDecodeRow(v.s); v.state = st; v.tasks = (st.tasks || []).filter(t => !t.deleted).length; v.missing = (st.tasks || []).filter(t => !t.deleted && !cur.has(t.id)).length; }
+    catch (e) { v.state = null; }
+  }
+  return out.sort((a, b) => b.at - a.at);
+}
+async function verRestore(st) {
+  let added = 0;
+  for (const k of ['lists', 'tasks', 'alarms', 'clips']) {
+    const have = new Set((S[k] || []).map(x => x.id));
+    for (const x of (st[k] || [])) if (x && !have.has(x.id) && !x.deleted) { (S[k] = S[k] || []).push(x); if (k === 'tasks') added++; }
+  }
+  save(); renderAll(); return added;
+}
+async function verGate() {
+  const g = $('#gate'); AUTH.step = 'sb-versions'; AUTH.over = true; g.hidden = false; g.classList.add('over'); closeLayers();
+  g.innerHTML = gCard('Restore earlier data', 'Looking for earlier copies...', '');
+  const list = await verList();
+  const fmt = t => new Date(t).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  VER_CACHE = list;
+  g.innerHTML = gCard('Restore earlier data', list.length ? 'Pick a copy to bring back the tasks it has that are missing now. Nothing you have now is removed.' : 'No earlier copies were found on this device or the server.',
+    `<div class="uplist" style="margin:4px 0 12px">${list.map((v, i) => `<div class="uprow" style="cursor:default"><div style="flex:1;min-width:0"><b style="font-size:13px">${fmt(v.at)}</b><div style="font-size:12px;color:var(--ink3)">${esc(v.note)} (${v.src === 'server' ? 'server' : 'this device'})${v.state ? ', ' + v.tasks + ' tasks' : ', cannot be read with this account'}</div></div>${v.state && v.missing ? `<button class="btn ghost" type="button" data-g="sb-ver-${i}">Bring back ${v.missing}</button>` : `<span class="k">${v.state ? 'Nothing missing' : ''}</span>`}</div>`).join('')}</div>
+     <button type="button" class="gbtn ghost" data-g="cancel">Close</button>`);
+}
+let VER_CACHE = [];
 document.addEventListener('visibilitychange', () => { if (!document.hidden) sbPull(); });
 addEventListener('online', () => { if (SBMODE && SB.dirty && !ENC.sealed) save(); });
-setInterval(sbPull, 60000);
+setInterval(() => { if (!document.hidden) sbPull(); }, 30000); // web: refresh every 30 seconds while visible
 
 // After the account password is known (sign-in, sign-up, password reset): open or create the data.
 async function sbAfterAuth() {
@@ -2480,7 +2657,7 @@ async function sbSignOut() {
   try { sessionStorage.removeItem('tudo:unlock'); if (SB.uid) localStorage.removeItem(sbKey('trust')); } catch (e) {}
   if (LN) { try { const p = await LN.getPending(); if (p.notifications && p.notifications.length) await LN.cancel({ notifications: p.notifications.map(n => ({ id: n.id })) }); } catch (e) {} }
   ENC.raw = null; ENC.key = null; ENV = null; ENC.sealed = true; AUTH.unlocked = false;
-  S = emptyState(null, S.settings); SB.user = null; SB.uid = null; SB.dirty = false;
+  S = emptyState(null, S.settings); SB.user = null; SB.uid = null; SB.dirty = false; SB.serverAt = null; SB.base = null; SB.remoteEnv = null;
   LOG.months = {}; LOG.loaded = {}; CL.items = {}; CL.sel = null; V.sel = null; V.view = 'tasks';
   renderAll(); gate('sb-signin');
 }
@@ -2490,11 +2667,13 @@ function sbSettingsHTML() {
     <button data-sec="sb-changepass">Change password</button>
     <button data-sec="sb-mfa-manage">Two-step sign-in</button>
     <button data-sec="newcodes">New recovery codes (${(S.auth && S.auth.rec || []).length} left)</button>
+    <button data-sec="sb-versions">Restore earlier data</button>
     <button data-sec="sb-signout">Sign out</button>
     <button data-sec="sb-delete" style="color:var(--over)">Delete account</button>`;
 }
 function sbSetting(k) {
   if (k === 'sb-signout') return sbSignOut();
+  if (k === 'sb-versions') return verGate();
   gate(k, true);
 }
 const pwField = (id, label, ac) => gField(id, label, 'password', `autocomplete="${ac}" required`);
@@ -2565,6 +2744,7 @@ async function sbMfaManage(cancel) {
   } catch (e) { g.innerHTML = gCard('Two-step sign-in', sbMsg(e), cancel); }
 }
 async function sbClick(k) {
+  if (k.startsWith('sb-ver-')) { const v = VER_CACHE[Number(k.slice(7))]; if (!v || !v.state) return; const n = await verRestore(v.state); closeGate(); renderAll(); toast(n ? 'Brought back ' + n + (n === 1 ? ' task' : ' tasks') : 'Nothing was missing'); return; }
   if (k === 'sb-to-signup') return gate('sb-signup');
   if (k === 'sb-to-signin') return gate('sb-signin');
   if (k === 'sb-to-forgot') { const e = $('#gemail'); if (e) SB.email = e.value.trim(); return gate('sb-forgot'); }
@@ -2688,7 +2868,7 @@ function settingsPop(anchor) {
     const cur = S.settings.accent || '', f = S.settings.font || 'inter', th = S.settings.theme || 'auto';
     el.innerHTML = `<div class="mlabel">Accent color</div><div class="swatches"><button data-acc="" class="${!cur ? 'on' : ''}" aria-label="Default accent" style="background:conic-gradient(#2740CB 0 50%,#22D3EE 0)"></button>${ACCENTS.slice(1).map(c => `<button style="background:${c}" data-acc="${c}" class="${cur === c ? 'on' : ''}" aria-label="Accent ${c}"></button>`).join('')}<input type="color" id="acccustom" value="${cur || '#2740CB'}" aria-label="Pick any accent color" title="Pick any color" style="width:28px;height:28px;border:0;padding:0;background:none;cursor:pointer"></div>
       <div class="mlabel">Font</div>${[['inter', 'Inter'], ['onest', 'Onest'], ['system', 'System default']].map(([k, n]) => `<button data-font="${k}">${f === k ? '✓ ' : ''}${n}</button>`).join('')}
-      <div class="mlabel">Tasks</div><button data-roll="1">${S.settings.rollover !== false ? '✓ ' : ''}Move unfinished tasks to the next day</button>
+      <div class="mlabel">Tasks</div><button data-tone="1">Task alarm tone: ${esc(toneLabel(S.settings.taskSound || 'beep'))}</button><button data-roll="1">${S.settings.rollover !== false ? '✓ ' : ''}Move unfinished tasks to the next day</button>
       <button data-keep="1">Keep work log: ${keepLabel()}</button>
       <div class="mlabel">Theme</div>${[['auto', 'Match system'], ['light', 'Light'], ['dark', 'Dark']].map(([k, n]) => `<button data-th="${k}">${th === k ? '✓ ' : ''}${n}</button>`).join('')}
       ${!NATIVE && !window.claude ? `<div class="mlabel">Apps</div><button data-sec="android">Get the Android app</button>` : ''}
@@ -2710,6 +2890,7 @@ function settingsPop(anchor) {
     if ('acc' in b.dataset) S.settings.accent = b.dataset.acc || '';
     if (b.dataset.font) S.settings.font = b.dataset.font;
     if (b.dataset.th) S.settings.theme = b.dataset.th;
+    if (b.dataset.tone) { const i = TONE_KEYS.indexOf(S.settings.taskSound || 'beep'); S.settings.taskSound = TONE_KEYS[(i + 1) % TONE_KEYS.length]; audio(); playSound(S.settings.taskSound); save(); draw(); return; }
     if (b.dataset.keep) { const o = [6, 12, 24, 0], c = keepMonths(); S.settings.keepMonths = o[(o.indexOf(c) + 1) % o.length]; save(); draw(); if (V.view === 'log') renderMain(); return; }
     if (b.dataset.roll) { S.settings.rollover = S.settings.rollover === false; save(); draw(); if (S.settings.rollover) renderAll(); return; }
     if (b.dataset.sec) {
@@ -2729,6 +2910,43 @@ function settingsPop(anchor) {
   el.addEventListener('change', e => { if (e.target.id === 'acccustom') draw(); });
   setTimeout(() => document.addEventListener('click', function h(ev) { if (!el.contains(ev.target)) { el.remove(); document.removeEventListener('click', h); } }), 0);
 }
+
+/* refresh: pull down on a phone, or tap the sync status in the sidebar */
+async function refreshNow() {
+  const changed = SBMODE ? await sbPull(true) : false;
+  LOG.months = {}; LOG.loaded = {};
+  if (AUTH.unlocked) renderAll();
+  if (typeof nativeSchedule === 'function') nativeSchedule();
+  return changed;
+}
+(function () {
+  const ptr = $('#ptr'); let y0 = null, dy = 0, busy = false, sc = null;
+  const TH = 70;
+  const scroller = el => { for (let n = el; n && n !== document.body; n = n.parentElement) { const s = getComputedStyle(n); if (/(auto|scroll)/.test(s.overflowY) && n.scrollHeight > n.clientHeight) return n; } return null; };
+  const blocked = () => document.body.classList.contains('gated') || AUTH.over || RING.cur || $('#layer .modal,#layer .ctx') || ($('#side').classList.contains('open')) || ($('#detail').classList.contains('open') && innerWidth <= 820);
+  const show = (d, cls) => { ptr.style.transform = 'translateY(' + Math.min(d, 110) * 0.6 + 'px)'; ptr.style.opacity = Math.min(1, d / TH); ptr.className = cls || ''; ptr.firstChild.style.transform = 'rotate(' + d * 3 + 'deg)'; };
+  const hide = () => { ptr.style.transition = 'transform .2s,opacity .2s'; ptr.style.transform = 'translateY(-60px)'; ptr.style.opacity = 0; ptr.className = ''; setTimeout(() => { ptr.style.transition = ''; }, 220); };
+  document.addEventListener('touchstart', e => {
+    if (busy || e.touches.length !== 1 || blocked() || !e.target.closest('#main')) { y0 = null; return; }
+    sc = scroller(e.target); if (sc && sc.scrollTop > 0) { y0 = null; return; }
+    y0 = e.touches[0].clientY; dy = 0;
+  }, { passive: true });
+  document.addEventListener('touchmove', e => {
+    if (y0 == null) return;
+    dy = e.touches[0].clientY - y0;
+    if (dy <= 0 || (sc && sc.scrollTop > 0)) { if (dy < 0) y0 = null; show(0); return; }
+    show(dy, dy > TH ? 'ready' : '');
+  }, { passive: true });
+  document.addEventListener('touchend', async () => {
+    if (y0 == null) return; y0 = null;
+    if (dy <= TH) { hide(); return; }
+    busy = true; show(TH, 'spin');
+    try { const changed = await refreshNow(); toast(changed ? 'Updated with changes from your other devices' : 'Up to date'); }
+    catch (e) { toast("Couldn't refresh. Check your connection."); }
+    busy = false; hide();
+  });
+  document.addEventListener('click', async e => { if (e.target.id === 'sync' && SBMODE) { setSync('Refreshing...'); await refreshNow(); } });
+})();
 
 /* refresh day boundaries */
 let lastDay = today();

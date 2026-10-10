@@ -62,4 +62,34 @@ if (!g.includes('TUDO_KEYSTORE')) {
   must(g.includes('signingConfig signingConfigs.release'), 'build.gradle signing');
   writeFileSync(gf, g);
 }
-console.log(`Android resources copied (${n}); permissions, backup rules, signing and versioning set`);
+// Alarm tones: render each tone defined in index.html (between /*TONES-START*/ and /*TONES-END*/) to a WAV file.
+const src = readFileSync('index.html', 'utf8');
+const m = src.match(/\/\*TONES-START\*\/\s*const TONES = (\{[\s\S]*?\});\s*\/\*TONES-END\*\//);
+must(m, 'tone definitions in index.html');
+const TONES = JSON.parse(m[1]);
+const RATE = 16000, SECS = 8;
+const wave = (w, ph) => w === 'square' ? (Math.sin(ph) >= 0 ? 1 : -1) : w === 'sawtooth' ? 2 * ((ph / (2 * Math.PI)) % 1) - 1 : w === 'triangle' ? 2 / Math.PI * Math.asin(Math.sin(ph)) : Math.sin(ph);
+mkdirSync(join(res, 'raw'), { recursive: true });
+for (const [key, t] of Object.entries(TONES)) {
+  const N = RATE * SECS, buf = new Float32Array(N);
+  for (let rep = 0; rep * t.len < SECS; rep++) {
+    for (const [st, f, d, w, v, f2] of t.notes) {
+      const s0 = Math.floor((rep * t.len + st) * RATE), len = Math.floor(d * RATE);
+      let ph = 0;
+      for (let i = 0; i < len && s0 + i < N; i++) {
+        const tt = i / RATE, g = f2 ? Math.min(tt / (d * 0.8), 1) : 0, fr = f2 ? f * Math.pow(f2 / f, g) : f;
+        ph += 2 * Math.PI * fr / RATE;
+        const env = tt < 0.01 ? v * tt / 0.01 : v * Math.exp(Math.log(0.001) * (tt - 0.01) / Math.max(0.02, d - 0.01));
+        buf[s0 + i] += env * wave(w, ph);
+      }
+    }
+  }
+  let peak = 0.0001; for (let i = 0; i < N; i++) peak = Math.max(peak, Math.abs(buf[i])); const gain = 0.85 / peak;
+  const out = Buffer.alloc(44 + N * 2);
+  out.write('RIFF', 0); out.writeUInt32LE(36 + N * 2, 4); out.write('WAVE', 8); out.write('fmt ', 12);
+  out.writeUInt32LE(16, 16); out.writeUInt16LE(1, 20); out.writeUInt16LE(1, 22); out.writeUInt32LE(RATE, 24); out.writeUInt32LE(RATE * 2, 28); out.writeUInt16LE(2, 32); out.writeUInt16LE(16, 34);
+  out.write('data', 36); out.writeUInt32LE(N * 2, 40);
+  for (let i = 0; i < N; i++) out.writeInt16LE(Math.max(-32767, Math.min(32767, Math.round(buf[i] * gain * 32767))), 44 + i * 2);
+  writeFileSync(join(res, 'raw', 'tone_' + key + '.wav'), out);
+}
+console.log(`Android resources copied (${n}); ${Object.keys(TONES).length} alarm tones rendered; permissions, backup rules, signing and versioning set`);
